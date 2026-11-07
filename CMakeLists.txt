@@ -54,6 +54,15 @@ if(SDL2_FOUND)
     add_subdirectory(runtime)
 endif()
 
+# Graphical launcher (add ROM -> recompile -> play). See launcher/README.md.
+option(GBRECOMP_BUILD_LAUNCHER "Build the graphical GB Recompiled launcher" OFF)
+if(GBRECOMP_BUILD_LAUNCHER)
+    if(NOT SDL2_FOUND)
+        message(FATAL_ERROR "GBRECOMP_BUILD_LAUNCHER needs SDL2")
+    endif()
+    add_subdirectory(launcher)
+endif()
+
 # Optional: Build tests
 option(BUILD_TESTS "Build test suite" OFF)
 if(BUILD_TESTS)

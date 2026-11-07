@@ -1,5 +1,9 @@
 # GB Recompiled
 
+> ### 🍎 Fork para Mac con launcher gráfico
+> Este fork añade **GB Recompiled.app**: elige una ROM, pulsa **Recompilar** y juega,
+> sin usar la Terminal. Instalación y uso en español: **[macos/README.md](macos/README.md)**.
+
 GB Recompiled turns Game Boy and Game Boy Color ROMs into portable C projects.
 It analyzes LR35902 code, emits generated C, and links that code with a shared
 SDL2 runtime for video, audio, input, persistence, and hardware timing.
