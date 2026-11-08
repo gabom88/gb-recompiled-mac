@@ -9,9 +9,10 @@ Ninja, y deja el juego en tu biblioteca listo para **Jugar**.
 
 > Este repositorio es un fork de [arcanite24/gb-recompiled](https://github.com/arcanite24/gb-recompiled).
 > El recompilador es el del proyecto original, sin cambios. El fork añade el
-> launcher (`launcher/`) y el instalador (`macos/install.sh`), y dos mejoras
-> pequeñas al runtime: el **autoguardado de la pila** y la **captura de portada**
-> (ver [sección 3](#3-partidas-guardadas) y [sección 4](#4-portadas-de-la-biblioteca)).
+> launcher (`launcher/`), el instalador (`macos/install.sh`) y estas mejoras al
+> runtime de los juegos:
+> **autoguardado de la pila**, **portadas**, **68 paletas de color** con `-`/`+`
+> y un **menú `Esc` en español, ordenado y que pausa el juego**.
 
 ---
 
@@ -64,13 +65,15 @@ recompilador y el launcher, crea **GB Recompiled.app** en tu carpeta
 3. La app lo recompila sola: verás el progreso paso a paso (traducir a C,
    preparar y compilar). En un i9 tarda unos **20–60 segundos** por juego.
    **Ver detalles** muestra lo que hacen las herramientas por dentro.
-4. Cuando diga *"listo para jugar"*, pulsa **JUGAR**.
+4. Cuando diga *"listo para jugar"*, pulsa **JUGAR** (o **CONTINUAR**, si dejaste
+   una partida a medias).
 
 | Botón | Qué hace |
 |---|---|
-| **JUGAR** | Abre el juego en su propia ventana. |
+| **JUGAR** / **CONTINUAR** | Abre el juego. *CONTINUAR* aparece cuando hay una partida en pausa (sección 3). |
 | **Recompilar** | Vuelve a generar el juego (por ejemplo, tras actualizar la app). **No borra tus partidas.** |
-| **Abrir carpeta de partidas** | Muestra en Finder los `.sav` y los estados guardados de ese juego. |
+| **Empezar de cero** | Descarta la partida en pausa: la próxima vez el juego empieza desde el principio. |
+| **Abrir carpeta de partidas** | Muestra en Finder los `.sav`, los estados y la portada de ese juego. |
 | **Abrir carpeta del juego** | La copia de la ROM, el proyecto generado y los registros (`build.log`, `last_run.log`). |
 | **Eliminar de la biblioteca** | Borra la copia y la compilación; tú decides si también sus partidas. |
 
@@ -87,11 +90,20 @@ compilación, así que recompilar o actualizar la app no las toca:
 ```
 ~/Library/Application Support/GB Recompiled/
 ├── games/<juego>/   ROM, proyecto generado y registros
-└── saves/<juego>/   .sav (pila), .rtc (reloj) y .state1…10 (estados)
+└── saves/<juego>/   .sav (pila), .rtc (reloj), .state1…10 (estados),
+                     resume.state (partida en pausa) y cover.bmp (portada)
 ```
 
-Hay dos formas de guardar:
+Hay tres formas de guardar:
 
+- **Continuar donde lo dejé** (activado por defecto, en la ficha de cada juego).
+  Al cerrar el juego se guarda el punto exacto, y la próxima vez el botón
+  **CONTINUAR** te devuelve justo ahí. Sirve para cualquier juego, también los
+  que **no tienen pila**: con Tetris conservas la tabla de récords mientras
+  sigas continuando. **Empezar de cero** descarta esa partida en pausa. Si
+  tras una actualización del motor la partida en pausa ya no es compatible, la
+  app lo detecta, la aparta (`resume-incompatible-….state`) y empieza el juego
+  desde el principio.
 - **Guardado del propio juego (pila del cartucho).** Los juegos con pila, como
   Pokémon o Zelda, guardan cuando guardas dentro del juego, como en la consola.
   El `.sav` se escribe **al momento**, en cuanto el juego termina de guardar
@@ -99,55 +111,89 @@ Hay dos formas de guardar:
   cuelgue, uses *Forzar salida* o se apague el Mac.
 - **Estados (en cualquier juego):** **F5** guarda, **F8** carga y **F6/F7**
   cambian de ranura (hay 10). En un MacBook con Touch Bar, mantén **fn**.
+  También desde la pestaña *Juego* del menú `Esc`.
 
-> **Tetris no tiene pila en el cartucho.** En la Game Boy original los récords
-> también se borraban al apagarla. Para continuar una partida, usa **F5/F8**.
+> **Tetris no tiene pila en el cartucho**: en la Game Boy original los récords
+> se borraban al apagarla. Con *Continuar donde lo dejé* se conservan.
 
 ---
 
-## 4. Portadas de la biblioteca
+## 4. Paletas de color
+
+Los juegos de **Game Boy clásico** pueden mostrarse con **69 paletas**: la
+original del motor y las **68 de GemuBoy**. Entre ellas están Game Boy Pocket,
+Light, BGB, las coloraciones de arranque de la Game Boy Color, Matrix, Virtual
+Boy, Sepia, Sakura, Ciberpunk…
+
+- Durante el juego: **`-`** paleta anterior, **`+`** paleta siguiente. Abajo
+  aparece el nombre, por ejemplo *"Paleta 8/69: GBC ↑+A Rojo"*.
+- O en el menú `Esc` › **Imagen**, con una lista que muestra los cuatro colores
+  de cada paleta.
+- Las paletas **"GBC …"** colorean los sprites aparte del fondo, como hace una
+  Game Boy Color: en *GBC ↑+A Rojo*, por ejemplo, las piezas de Tetris salen
+  verdes sobre fondo rojo.
+- La paleta elegida se recuerda para la próxima vez.
+- Los juegos de **Game Boy Color** usan sus propios colores, así que ahí no
+  cambia nada.
+
+---
+
+## 5. Portadas de la biblioteca
 
 Mientras juegas, pulsa **`P`** (o **`F12`**; en la Touch Bar, **fn+F12**) y la
 pantalla de ese momento se convierte en la **portada** del juego en la
-biblioteca. Verás el aviso *"Cover captured for the library"* abajo en el juego,
-y el launcher la muestra al instante, aunque el juego siga abierto. Puedes
-capturar otra cuando quieras para cambiarla, o pulsar **Quitar portada** en la
-ficha del juego. Se guarda como `cover.bmp` junto a las partidas.
+biblioteca. Verás el aviso *"Portada capturada para la biblioteca"* y el
+launcher la muestra al instante, aunque el juego siga abierto. Puedes capturar
+otra cuando quieras, o pulsar **Quitar portada** en la ficha del juego.
 
 ---
 
-## 5. Controles del juego
+## 6. Controles y menú del juego
 
 | Game Boy | Teclado |
 |---|---|
-| Cruceta | Flechas |
-| A / B | `Z` / `X` |
-| Start / Select | `Return` / `Shift` derecho |
+| Cruceta | Flechas (o `W` `A` `S` `D`) |
+| A / B | `Z` / `X` (o `J` / `K`) |
+| Start / Select | `Return` / `Delete` (o `Shift` derecho) |
 
 | Atajo | Acción |
 |---|---|
-| `Esc` | Menú de ajustes del juego (controles, sonido, imagen, ranuras). |
+| `Esc` | Abre o cierra el menú (el juego **se pausa** mientras está abierto). |
+| `-` / `+` | Paleta anterior / siguiente. |
 | `Tab` (mantener) | Avance rápido. |
-| `F5` / `F8` | Guardar / cargar estado. |
+| `F5` / `F8` | Guardar / cargar estado (`F6`/`F7` cambian de ranura). |
 | `P` o `F12` | Capturar la portada para la biblioteca. |
+| `M` | Silenciar. |
 
-La lista completa está en [RUNTIME.md](../RUNTIME.md).
+**El menú `Esc`** está en español y en pestañas:
+
+| Pestaña | Contenido |
+|---|---|
+| **Juego** | Estados guardados (ranura, guardar, cargar, borrar), capturar portada. |
+| **Imagen** | Paleta de colores, pantalla completa, tamaño de ventana, escalado y filtro. |
+| **Sonido** | Activar sonido, silenciar, volumen y dispositivo de salida. |
+| **Controles** | Botones del Game Boy y atajos, para teclado y mando (clic y pulsa la nueva tecla). |
+| **Avanzado** | Lo técnico: velocidad, V-Sync, rendimiento en pantalla, latencia de audio y diagnóstico del recompilador. |
+
+Las opciones que solo sirven para ports especiales (como el panel del port de
+Pokémon Crystal) ya no aparecen en los juegos normales.
 
 ---
 
-## 6. Actualizar
+## 7. Actualizar
 
 ```bash
 cd ~/gb-recompiled-mac && git pull && ./macos/install.sh
 ```
 
-Tu biblioteca y tus partidas se conservan. Si una actualización cambia el
-motor, pulsa **Recompilar** en cada juego. Los estados de una versión anterior
-pueden no cargar; los `.sav` de la pila siempre se mantienen.
+Tu biblioteca y tus partidas se conservan. **Después pulsa *Recompilar* en cada
+juego**: las mejoras del runtime (paletas, menú, autoguardado…) viajan dentro de
+cada juego compilado. Los estados de una versión anterior pueden no cargar; los
+`.sav` de la pila siempre se mantienen.
 
 ---
 
-## 7. Solución de problemas
+## 8. Solución de problemas
 
 | Síntoma | Solución |
 |---|---|
@@ -156,13 +202,14 @@ pueden no cargar; los `.sav` de la pila siempre se mantienen.
 | Error al recompilar | Pulsa **Ver detalles** o abre `build.log` con **Abrir carpeta del juego**. |
 | El juego se cierra al abrirlo | Mira `last_run.log` en la carpeta del juego. |
 | macOS dice que no puede abrir la app | Clic derecho sobre la app › **Abrir** › **Abrir** (solo la primera vez). |
+| `-`/`+`, el menú nuevo o `P` no funcionan | Ese juego se compiló con una versión anterior: pulsa **Recompilar**. |
 | `F5`/`F8`/`F12` no hacen nada | En la Touch Bar mantén **fn**, o usa `P` para la portada. |
-| Un juego con pila no conserva la partida | Pulsa **Recompilar** en ese juego: el autoguardado viene en el runtime que se copia al recompilar. |
-| `P` no captura la portada | Ese juego se compiló con una versión anterior: pulsa **Recompilar**. |
+| *"No se pudo continuar la partida anterior"* | Era de otra versión del motor: se apartó y el juego empezó de cero. |
+| Las paletas no cambian nada | Es un juego de Game Boy Color: usa sus propios colores. |
 
 ---
 
-## 8. Cómo funciona por dentro
+## 9. Cómo funciona por dentro
 
 ```
 ROM ──► gbrecomp ──► proyecto C (+ copia del runtime) ──► cmake + ninja ──► juego nativo
@@ -172,25 +219,38 @@ ROM ──► gbrecomp ──► proyecto C (+ copia del runtime) ──► cmak
   que el runtime, así que no añade dependencias nuevas.
 - Lanza las herramientas como procesos aparte y muestra su salida en directo.
   Ninja informa de su progreso (`[n/m]`) y con eso se calcula la barra.
-- Ejecuta cada juego con `--save-dir saves/<juego>`, una opción del runtime
-  original.
-- **Cambios al runtime** (`runtime/src/platform_sdl.cpp`, documentados en
-  [RUNTIME.md](../RUNTIME.md)): el autoguardado de la pila y la acción *Capture
-  library cover*. Como el port de Pokémon Crystal fija la huella del runtime,
-  se actualizó `ports/pokemon-crystal/standalone/gbrecomp-contract.json`.
+- Ejecuta cada juego con opciones del runtime original: `--save-dir
+  saves/<juego>` y, con *Continuar*, `--save-state-file` / `--load-state-file
+  resume.state`.
+- **Cambios al runtime** (documentados en [RUNTIME.md](../RUNTIME.md)):
+  - `platform_sdl.cpp`: autoguardado de la pila, acción de portada, paletas con
+    `-`/`+`, menú en pestañas que pausa el juego y fuente con tildes.
+  - `ppu.c`: paleta opcional por capa (fondo, OBP0, OBP1). Sin paleta elegida,
+    la salida es idéntica a la original.
+  - `gb_display_palettes.h`: las 68 paletas importadas de GemuBoy.
+  - Como el port de Pokémon Crystal fija la huella del runtime, se actualizó
+    `ports/pokemon-crystal/standalone/gbrecomp-contract.json`.
 - Con `-DGBRECOMP_BUILD_LAUNCHER=ON` se compila junto al resto del proyecto. Por
   defecto está desactivado, así que la compilación normal del proyecto original
   no cambia.
 
-**Cómo se probó** (en Linux, sin un Mac físico): con una ROM real de Tetris
-V1.1 se comprobaron añadir, recompilar (~21 s), jugar, guardar con F5,
-recompilar y cargar con F8, y que el estado sobrevivió. La pila se probó con
-una ROM propia de cartucho MBC1 + pila que suma 1 a un contador en cada
-arranque: el `.sav` llegó a 1 → 2 → 3 **cerrando el juego a la fuerza**
-(`kill -9`) en cada arranque. La portada se probó pulsando `P` en el título de
-Tetris (se creó `cover.bmp`, apareció el aviso y la biblioteca la mostró).
+**Cómo se probó** (en Linux, sin un Mac físico), con una ROM real de Tetris
+V1.1:
+
+- **Básico:** añadir, recompilar (~21 s), jugar, F5/F8.
+- **Portada:** con `P` se creó `cover.bmp` y la biblioteca la mostró.
+- **Paletas:** con `-`/`+` y desde el menú; en *GBC Rojo*, la pieza (sprite)
+  sale verde sobre fondo rojo.
+- **Menú:** las cinco pestañas funcionan. Con el menú abierto 4 s la pieza no
+  se movió; sin menú, cayó.
+- **Continuar:** al cerrar se creó `resume.state` y CONTINUAR volvió al mismo
+  punto (*"Loaded execution state"*). Con un `resume.state` corrupto, la app lo
+  apartó y abrió el juego desde el principio.
+- **Pila:** con una ROM propia de cartucho MBC1 + pila, el `.sav` llegó a
+  1 → 2 → 3 **cerrando el juego a la fuerza** (`kill -9`).
+
 Batería de pruebas del repo: 83/85; los 2 fallos también ocurren sin estos
-cambios. También se probaron el
-aviso de dependencias y el rechazo de archivos que no son ROMs. El launcher
-compila sin avisos con GCC y Clang. **Pendiente de confirmar en un Mac:** el
-selector de archivos de macOS, arrastrar a la ventana, el icono y la `.app`.
+cambios. Las pruebas externas de PPU (Blargg/Mooneye) no se pudieron ejecutar
+aquí porque esas ROMs no están disponibles. **Pendiente de confirmar en un
+Mac:** el selector de archivos de macOS, arrastrar a la ventana, el icono y la
+`.app`.

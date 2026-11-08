@@ -28,6 +28,41 @@ static const uint16_t dmg_palette_rgb555[4] = {
     0x0841,
 };
 
+/* Optional host colour scheme for DMG games (a display palette such as
+ * "Game Boy Pocket"), with separate tables for BG/window, OBP0 and OBP1 like a
+ * Game Boy Color colourising a monochrome cartridge. Off by default: every
+ * layer then uses dmg_palette_rgb555, so output is byte-identical to before.
+ * Only the DMG rendering paths consult it; CGB and CGB-compat modes keep their
+ * palette RAM. */
+static bool g_dmg_layer_override = false;
+static uint16_t g_dmg_layer_rgb555[3][4];   /* [0] BG/window, [1] OBP0, [2] OBP1 */
+
+static inline uint16_t dmg_layer_rgb555(int layer, uint8_t shade) {
+    return g_dmg_layer_override ? g_dmg_layer_rgb555[layer][shade & 3u]
+                                : dmg_palette_rgb555[shade & 3u];
+}
+
+static uint16_t rgb888_to_rgb555(uint32_t rgb) {
+    const uint16_t r = (uint16_t)(((rgb >> 16) & 0xFFu) * 31u / 255u);
+    const uint16_t g = (uint16_t)(((rgb >> 8) & 0xFFu) * 31u / 255u);
+    const uint16_t b = (uint16_t)((rgb & 0xFFu) * 31u / 255u);
+    return (uint16_t)(r | (g << 5) | (b << 10));
+}
+
+void ppu_set_dmg_layer_palettes(const uint32_t* bg, const uint32_t* obj0, const uint32_t* obj1) {
+    if (!bg) {
+        g_dmg_layer_override = false;
+        return;
+    }
+    const uint32_t* layers[3] = {bg, obj0 ? obj0 : bg, obj1 ? obj1 : bg};
+    for (int layer = 0; layer < 3; ++layer) {
+        for (int shade = 0; shade < 4; ++shade) {
+            g_dmg_layer_rgb555[layer][shade] = rgb888_to_rgb555(layers[layer][shade]);
+        }
+    }
+    g_dmg_layer_override = true;
+}
+
 /* ============================================================================
  * CGB compatibility palette tables (ported from SameBoy's cgb_boot.asm)
  * ========================================================================== */
@@ -279,7 +314,7 @@ void ppu_init(GBPPU* ppu) {
 void ppu_reset(GBPPU* ppu, const GBContext* ctx) {
     bool cgb_mode = ppu_is_cgb_mode(ctx);
     bool cgb_compat_mode = ppu_is_cgb_compat_mode(ctx);
-    uint16_t default_color = cgb_mode ? 0x7FFF : dmg_palette_rgb555[0];
+    uint16_t default_color = cgb_mode ? 0x7FFF : dmg_layer_rgb555(0, 0);
 
     memset(ppu->framebuffer, 0, sizeof(ppu->framebuffer));
     for (size_t i = 0; i < GB_FRAMEBUFFER_SIZE; i++) {
@@ -381,7 +416,7 @@ static uint16_t resolve_bg_color(const GBPPU* ppu,
         return read_palette_color(ppu->bg_palette_ram, 0, shade);
     }
 
-    return dmg_palette_rgb555[apply_palette(raw_color, dmg_palette_reg)];
+    return dmg_layer_rgb555(0, apply_palette(raw_color, dmg_palette_reg));
 }
 
 static uint16_t resolve_obj_color(const GBPPU* ppu,
@@ -398,7 +433,7 @@ static uint16_t resolve_obj_color(const GBPPU* ppu,
         return read_palette_color(ppu->obj_palette_ram, palette_number, shade);
     }
 
-    return dmg_palette_rgb555[apply_palette(raw_color, dmg_palette_reg)];
+    return dmg_layer_rgb555(1 + (palette_number & 1), apply_palette(raw_color, dmg_palette_reg));
 }
 
 static void render_bg_scanline(GBPPU* ppu,
@@ -420,7 +455,7 @@ static void render_bg_scanline(GBPPU* ppu,
         memset(bg_raw, 0, GB_SCREEN_WIDTH);
         memset(bg_priority, 0, GB_SCREEN_WIDTH);
         for (size_t x = 0; x < GB_SCREEN_WIDTH; x++) {
-            ppu->color_framebuffer[scanline * GB_SCREEN_WIDTH + x] = dmg_palette_rgb555[0];
+            ppu->color_framebuffer[scanline * GB_SCREEN_WIDTH + x] = dmg_layer_rgb555(0, 0);
         }
         return;
     }
@@ -443,10 +478,10 @@ static void render_bg_scanline(GBPPU* ppu,
             (uint8_t)((palette >> 6) & 0x03),
         };
         uint16_t color_lut[4] = {
-            dmg_palette_rgb555[shade_lut[0]],
-            dmg_palette_rgb555[shade_lut[1]],
-            dmg_palette_rgb555[shade_lut[2]],
-            dmg_palette_rgb555[shade_lut[3]],
+            dmg_layer_rgb555(0, shade_lut[0]),
+            dmg_layer_rgb555(0, shade_lut[1]),
+            dmg_layer_rgb555(0, shade_lut[2]),
+            dmg_layer_rgb555(0, shade_lut[3]),
         };
 
         if (!bg_visible) {
@@ -454,7 +489,7 @@ static void render_bg_scanline(GBPPU* ppu,
             memset(bg_raw, 0, GB_SCREEN_WIDTH);
             memset(bg_priority, 0, GB_SCREEN_WIDTH);
             for (size_t x = 0; x < GB_SCREEN_WIDTH; x++) {
-                ppu->color_framebuffer[row_base + x] = dmg_palette_rgb555[0];
+                ppu->color_framebuffer[row_base + x] = dmg_layer_rgb555(0, 0);
             }
             return;
         }
@@ -548,7 +583,7 @@ static void render_bg_scanline(GBPPU* ppu,
 
         if (!bg_visible && !in_window) {
             ppu->framebuffer[scanline * GB_SCREEN_WIDTH + x] = 0;
-            ppu->color_framebuffer[scanline * GB_SCREEN_WIDTH + x] = dmg_palette_rgb555[0];
+            ppu->color_framebuffer[scanline * GB_SCREEN_WIDTH + x] = dmg_layer_rgb555(0, 0);
             bg_raw[x] = 0;
             bg_priority[x] = 0;
             continue;
@@ -650,8 +685,8 @@ static void render_dmg_sprites_scanline_fast(GBPPU* ppu,
     for (int i = 0; i < 4; i++) {
         obp0_lut[i] = (uint8_t)((ppu->latched_obp0 >> (i * 2)) & 0x03);
         obp1_lut[i] = (uint8_t)((ppu->latched_obp1 >> (i * 2)) & 0x03);
-        obp0_color_lut[i] = dmg_palette_rgb555[obp0_lut[i]];
-        obp1_color_lut[i] = dmg_palette_rgb555[obp1_lut[i]];
+        obp0_color_lut[i] = dmg_layer_rgb555(1, obp0_lut[i]);
+        obp1_color_lut[i] = dmg_layer_rgb555(2, obp1_lut[i]);
     }
 
     for (int i = 0; i < sprite_count; i++) {

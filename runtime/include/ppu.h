@@ -230,6 +230,11 @@ const uint32_t* ppu_get_framebuffer(GBPPU* ppu);
 /** @brief Return the RGB color emitted for a DMG shade (0-3). */
 uint32_t ppu_get_dmg_shade_rgb(uint8_t shade);
 
+/* Host display palette for DMG games: four 0xRRGGBB shades (lightest first)
+ * for BG/window, OBP0 and OBP1 (NULL obj tables reuse bg). bg == NULL turns
+ * the override off (default PPU colours). Not part of savestates. */
+void ppu_set_dmg_layer_palettes(const uint32_t* bg, const uint32_t* obj0, const uint32_t* obj1);
+
 /**
  * @brief Render a scanline
  */

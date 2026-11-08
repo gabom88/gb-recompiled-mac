@@ -3,6 +3,7 @@
  * @brief SDL2 platform implementation for GameBoy runtime with ImGui
  */
 
+#include "gb_display_palettes.h"
 #include "platform_sdl.h"
 #include "gbrt.h"   /* For GBPlatformCallbacks */
 #include "gbrt_port.h"
@@ -64,7 +65,10 @@ static GBPlatformTimingInfo g_last_timing = {};
 static bool g_show_menu = false;
 static bool g_show_overlay = false;
 static int g_speed_percent = 100;
-static int g_palette_idx = 0;
+static int g_palette_idx = 0;   /* legacy host recolour (kept for the display test hook) */
+/* Display palette for DMG games: 0 = the PPU's own colours, 1..N = entries of
+ * kGbDisplayPalettes (gb_display_palettes.h), applied inside the PPU per layer. */
+static int g_display_palette = 0;
 static bool g_smooth_lcd_transitions = true;
 static bool g_launcher_return_enabled = false;
 static bool g_benchmark_mode = false;
@@ -77,7 +81,6 @@ static bool g_fullscreen = false;
 static bool g_app_suspended = false;
 static bool g_renderer_reset_pending = false;
 static GBPlatformExitAction g_exit_action = GB_PLATFORM_EXIT_QUIT;
-static const char* g_palette_names[] = { "Original (Green)", "Black & White (Pocket)", "Amber (Plasma)" };
 static const char* g_scale_names[] = { "1x (160x144)", "2x (320x288)", "3x (480x432)", "4x (640x576)", "5x (800x720)", "6x (960x864)", "7x (1120x1008)", "8x (1280x1152)" };
 typedef enum GBRenderScalingMode {
     GB_RENDER_SCALING_PIXEL_PERFECT = 0,
@@ -164,10 +167,6 @@ static const char* g_render_scaling_mode_names[] = {
     "Aspect Fill",
     "Stretch",
 };
-static const char* g_render_filter_names[] = {
-    "Nearest",
-    "Linear",
-};
 static const uint32_t g_palettes[][4] = {
     { 0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820 }, // Original
     { 0xFFFFFFFF, 0xFFAAAAAA, 0xFF555555, 0xFF000000 }, // B&W
@@ -195,25 +194,25 @@ static int g_binding_capture_slot = 0;
 static bool g_fast_forward_active = false;
 static bool g_max_speed_mode = false;
 static const char* g_input_action_names[GB_INPUT_ACTION_COUNT] = {
-    "Right",
-    "Left",
-    "Up",
-    "Down",
-    "Game Boy A",
-    "Game Boy B",
+    "Derecha",
+    "Izquierda",
+    "Arriba",
+    "Abajo",
+    "A",
+    "B",
     "Select",
     "Start",
-    "Fast Forward (Hold)",
-    "Toggle Max Speed",
-    "Save State",
-    "Load State",
-    "Previous State Slot",
-    "Next State Slot",
-    "Toggle Overlay",
-    "Toggle Mute",
-    "Toggle Menu",
-    "Toggle Game Panel",
-    "Capture Library Cover",
+    "Avance rápido (mantener)",
+    "Velocidad máxima (activar/desactivar)",
+    "Guardar estado",
+    "Cargar estado",
+    "Ranura anterior",
+    "Ranura siguiente",
+    "Mostrar rendimiento (FPS)",
+    "Silenciar",
+    "Abrir este menú",
+    "Panel del port (solo ports especiales)",
+    "Capturar portada para la biblioteca",
 };
 
 static bool has_interpreter_activity(const GBContext* ctx) {
@@ -250,6 +249,12 @@ static const char* controller_menu_hint_text(void);
 static bool input_action_is_runtime(GBInputAction action);
 static int effective_speed_percent(void);
 static void update_runtime_action_state(GBContext* ctx);
+static void apply_display_palette(void);
+static int display_palette_total(void);
+static const char* display_palette_name(int index);
+static bool display_palette_locked(void);
+static void select_display_palette(int index, bool announce);
+static void step_display_palette(int delta);
 
 /* Joypad state - exported for gbrt.c to access */
 uint8_t g_joypad_buttons = 0xFF;  /* Active low: Start, Select, B, A */
@@ -360,9 +365,9 @@ static float settings_ui_scale_for_size(const ImVec2& display_size) {
 
 static const char* controller_menu_hint_text(void) {
 #if defined(__ANDROID__)
-    return "Guide, L3, or R3: Settings Menu";
+    return "Mando: Guide, L3 o R3 abren este menú";
 #else
-    return "Guide / Home: Settings Menu";
+    return "Mando: el botón Guide / Home abre este menú";
 #endif
 }
 
@@ -1045,6 +1050,16 @@ static void load_runtime_preferences(void) {
                     g_audio_target_device_name = value;
                     continue;
                 }
+                if (strcmp(key, "video.palette") == 0) {
+                    g_display_palette = 0;
+                    for (int i = 0; i < GB_DISPLAY_PALETTE_COUNT; ++i) {
+                        if (strcmp(value, kGbDisplayPalettes[i].id) == 0) {
+                            g_display_palette = i + 1;
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 if (strcmp(key, "savestate.slot") == 0) {
                     long parsed = strtol(value, NULL, 10);
                     if (parsed >= 0 && parsed < GB_SAVESTATE_SLOT_COUNT) {
@@ -1141,6 +1156,7 @@ static void load_runtime_preferences(void) {
             make_binding(GB_INPUT_BINDING_NONE, 0);
     }
     update_effective_joypad_state();
+    apply_display_palette();
 }
 
 static void binding_to_config_value(const GBInputBinding& binding, char* out, size_t out_size) {
@@ -1192,6 +1208,8 @@ static void save_runtime_preferences(void) {
             g_audio_volume_percent.load(std::memory_order_relaxed));
     fprintf(file, "audio.device_name=%s\n", g_audio_target_device_name.c_str());
     fprintf(file, "savestate.slot=%d\n", g_savestate_slot);
+    fprintf(file, "video.palette=%s\n",
+            g_display_palette > 0 ? kGbDisplayPalettes[g_display_palette - 1].id : "engine");
 
     for (int action = 0; action < GB_INPUT_ACTION_COUNT; action++) {
         for (int slot = 0; slot < 2; slot++) {
@@ -1891,6 +1909,9 @@ static void reset_runtime_display_defaults(void) {
     g_scale = 5;
     g_speed_percent = 100;
     g_palette_idx = 0;
+    g_display_palette = 0;
+    ppu_set_dmg_layer_palettes(NULL, NULL, NULL);
+    g_lcd_off_framebuffer_initialized = false;
     g_smooth_lcd_transitions = true;
     g_vsync = false;
     g_show_overlay = false;
@@ -2012,11 +2033,15 @@ static void render_binding_editor(const char* section_label,
     const bool compact_layout = content_width < 720.0f;
 
     for (int action = (int)action_begin; action < (int)action_end; action++) {
+        if (action == GB_INPUT_ACTION_TOGGLE_PORT_UI &&
+            (!g_registered_ctx || !g_registered_ctx->port_state)) {
+            continue;   /* only exact-ROM ports (e.g. Crystal) have a game panel */
+        }
         ImGui::PushID(section_label);
         ImGui::PushID(action);
         ImGui::Text("%s", g_input_action_names[action]);
 
-        const float clear_width = ImGui::CalcTextSize("Clear").x + style.FramePadding.x * 2.0f + 12.0f;
+        const float clear_width = ImGui::CalcTextSize("Quitar").x + style.FramePadding.x * 2.0f + 12.0f;
         if (!compact_layout) {
             const float action_column_width = content_width * 0.26f;
             float binding_width =
@@ -2032,7 +2057,7 @@ static void render_binding_editor(const char* section_label,
                     g_binding_capture_device == device &&
                     g_binding_capture_action == (GBInputAction)action &&
                     g_binding_capture_slot == slot) {
-                    label = "Press Input...";
+                    label = "Pulsa una tecla...";
                 } else {
                     label = binding_display_label(bindings[action][slot]);
                 }
@@ -2042,7 +2067,7 @@ static void render_binding_editor(const char* section_label,
                     start_binding_capture(device, (GBInputAction)action, slot);
                 }
                 ImGui::SameLine();
-                if (ImGui::Button("Clear", ImVec2(clear_width, 0.0f))) {
+                if (ImGui::Button("Quitar", ImVec2(clear_width, 0.0f))) {
                     assign_binding_slot(device, (GBInputAction)action, slot, make_binding(GB_INPUT_BINDING_NONE, 0));
                 }
                 ImGui::PopID();
@@ -2061,7 +2086,7 @@ static void render_binding_editor(const char* section_label,
                     g_binding_capture_device == device &&
                     g_binding_capture_action == (GBInputAction)action &&
                     g_binding_capture_slot == slot) {
-                    label = "Press Input...";
+                    label = "Pulsa una tecla...";
                 } else {
                     label = binding_display_label(bindings[action][slot]);
                 }
@@ -2071,7 +2096,7 @@ static void render_binding_editor(const char* section_label,
                     start_binding_capture(device, (GBInputAction)action, slot);
                 }
                 ImGui::SameLine();
-                if (ImGui::Button("Clear", ImVec2(clear_width, 0.0f))) {
+                if (ImGui::Button("Quitar", ImVec2(clear_width, 0.0f))) {
                     assign_binding_slot(device, (GBInputAction)action, slot, make_binding(GB_INPUT_BINDING_NONE, 0));
                 }
                 ImGui::PopID();
@@ -2087,8 +2112,11 @@ static void ensure_lcd_off_framebuffer(void) {
         return;
     }
 
+    const uint32_t blank = g_display_palette > 0
+        ? (0xFF000000u | kGbDisplayPalettes[g_display_palette - 1].bg[0])
+        : 0xFFE0F8D0u;
     for (int i = 0; i < GB_FRAMEBUFFER_SIZE; i++) {
-        g_lcd_off_framebuffer[i] = 0xFFE0F8D0;
+        g_lcd_off_framebuffer[i] = blank;
     }
 
     g_lcd_off_framebuffer_initialized = true;
@@ -2234,7 +2262,7 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
     int pitch;
     SDL_LockTexture(g_texture, NULL, &pixels, &pitch);
 
-    copy_display_frame(pixels, pitch, framebuffer, g_palette_idx, g_registered_ctx);
+    copy_display_frame(pixels, pitch, framebuffer, 0, g_registered_ctx);
 
     SDL_UnlockTexture(g_texture);
     g_last_timing.upload_ms = sdl_now_ms() - upload_start_ms;
@@ -2253,18 +2281,15 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
 
     if (g_show_menu) {
         const float ui_scale = imgui_io.FontGlobalScale;
-        const float footer_height = ImGui::GetFrameHeightWithSpacing() *
-                                    (g_launcher_return_enabled ? 3.8f : 3.0f);
-
         ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
         ImGui::SetNextWindowSize(imgui_io.DisplaySize, ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(0.96f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f * ui_scale, 16.0f * ui_scale));
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f * ui_scale, 10.0f * ui_scale));
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f * ui_scale, 10.0f * ui_scale));
-        ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 18.0f * ui_scale);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f * ui_scale, 8.0f * ui_scale));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f * ui_scale, 9.0f * ui_scale));
+        ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 16.0f * ui_scale);
         ImGui::Begin("GameBoy Recompiled",
                      &g_show_menu,
                      ImGuiWindowFlags_NoDecoration |
@@ -2272,317 +2297,333 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
                          ImGuiWindowFlags_NoResize |
                          ImGuiWindowFlags_NoSavedSettings |
                          ImGuiWindowFlags_NoCollapse);
-        ImGui::Text("GameBoy Recompiled");
-        ImGui::TextDisabled("Settings");
+
+        /* ---- header: title + resume -------------------------------------- */
+        ImGui::TextUnformatted("Menú");
         ImGui::SameLine();
-        if (ImGui::Button("Resume")) {
-            g_show_menu = false;
-        }
-        ImGui::Separator();
-        ImGui::TextWrapped("Toggle menu: %s", controller_menu_hint_text());
-#if defined(__ANDROID__)
-        ImGui::TextWrapped("Android Back / Escape also opens or closes the menu.");
-#else
-        ImGui::TextWrapped("Escape also opens or closes the menu.");
-#endif
-        ImGui::Separator();
-        ImGui::BeginChild("SettingsScroll", ImVec2(0.0f, -footer_height), false);
-        ImGui::Text("Performance: %.1f FPS", ImGui::GetIO().Framerate);
-
-        int window_w = 0;
-        int window_h = 0;
-        SDL_GetWindowSize(g_window, &window_w, &window_h);
-
-        ImGui::Separator();
-        ImGui::TextDisabled("Graphics");
-        ImGui::Text("Window: %d x %d", window_w, window_h);
-        ImGui::Text("Viewport: %d x %d (%.2fx)",
-                    g_game_viewport.w,
-                    g_game_viewport.h,
-                    (double)g_game_viewport.w / (double)GB_SCREEN_WIDTH);
-
-        bool fullscreen = g_fullscreen;
-        if (ImGui::Checkbox("Fullscreen", &fullscreen)) {
-            set_fullscreen_enabled(fullscreen);
-        }
-
-        int scaling_mode = (int)g_render_scaling_mode;
-        if (ImGui::Combo("Scaling Mode",
-                         &scaling_mode,
-                         g_render_scaling_mode_names,
-                         IM_ARRAYSIZE(g_render_scaling_mode_names))) {
-            g_render_scaling_mode = (GBRenderScalingMode)scaling_mode;
-            update_game_viewport();
-        }
-
-        int filter_mode = (int)g_render_filter_mode;
-        if (ImGui::Combo("Scale Filter",
-                         &filter_mode,
-                         g_render_filter_names,
-                         IM_ARRAYSIZE(g_render_filter_names))) {
-            g_render_filter_mode = (GBRenderFilterMode)filter_mode;
-            update_render_filter();
-        }
-
-        if (!g_fullscreen) {
-            int scale_idx = g_scale - 1;
-            if (ImGui::Combo("Window Size",
-                             &scale_idx,
-                             g_scale_names,
-                             IM_ARRAYSIZE(g_scale_names))) {
-                g_scale = scale_idx + 1;
-                apply_window_scale_preset();
+        ImGui::TextDisabled("(Esc para volver al juego)");
+        {
+            const char* resume_label = "Volver al juego";
+            const float w = ImGui::CalcTextSize(resume_label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - w);
+            if (ImGui::Button(resume_label)) {
+                g_show_menu = false;
             }
-        } else {
-            ImGui::TextDisabled("Window Size is disabled while fullscreen is active.");
         }
-
         ImGui::Separator();
-        ImGui::TextDisabled("Runtime");
-        if (ImGui::Checkbox("V-Sync", &g_vsync)) {
-            SDL_RenderSetVSync(g_renderer, g_vsync ? 1 : 0);
-        }
 
-        ImGui::Checkbox("Show Overlay", &g_show_overlay);
-        ImGui::Checkbox("Smooth Slow Frames", &g_smooth_lcd_transitions);
-        if (ImGui::SliderInt("Speed %", &g_speed_percent, 10, 500)) {
-            reset_audio_output_buffer(true);
-        }
-        if (ImGui::Button("Reset Speed")) {
-            g_speed_percent = 100;
-            g_max_speed_mode = false;
-            reset_audio_output_buffer(true);
-        }
-        ImGui::Text("Effective Speed: %d%%", effective_speed_percent());
-        if (g_fast_forward_active) {
-            ImGui::TextDisabled("Fast forward shortcut is active.");
-        } else if (g_max_speed_mode) {
-            ImGui::TextDisabled("Max speed shortcut is active.");
-        }
-        const bool cgb_colors = g_registered_ctx &&
-            g_registered_ctx->config.model == GB_MODEL_CGB;
-        ImGui::BeginDisabled(cgb_colors);
-        ImGui::Combo("Palette", &g_palette_idx, g_palette_names, IM_ARRAYSIZE(g_palette_names));
-        ImGui::EndDisabled();
-        if (cgb_colors) {
-            ImGui::TextDisabled("Game Boy Color uses the game's color palettes.");
-        }
+        const float footer_height = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y * 2.0f;
+        ImGui::BeginChild("MenuBody", ImVec2(0.0f, -footer_height), false);
+        if (ImGui::BeginTabBar("MenuTabs")) {
 
-        ImGui::Separator();
-        ImGui::TextDisabled("Audio");
-        if (ImGui::Checkbox("Enable Audio Output", &g_audio_output_enabled)) {
-            reset_audio_output_buffer(true);
-            save_runtime_preferences();
-        }
-        bool audio_muted = g_audio_muted.load(std::memory_order_relaxed);
-        if (ImGui::Checkbox("Mute", &audio_muted)) {
-            g_audio_muted.store(audio_muted, std::memory_order_relaxed);
-            save_runtime_preferences();
-        }
-        int audio_volume_percent =
-            (int)g_audio_volume_percent.load(std::memory_order_relaxed);
-        if (ImGui::SliderInt("Master Volume (%)", &audio_volume_percent, 0, 200)) {
-            g_audio_volume_percent.store((uint32_t)audio_volume_percent,
-                                         std::memory_order_relaxed);
-            save_runtime_preferences();
-        }
-        if (ImGui::BeginCombo("Output Device", current_audio_output_device_label())) {
-            bool selected_default = g_audio_target_device_name.empty();
-            if (ImGui::Selectable("System Default", selected_default)) {
-                g_audio_target_device_name.clear();
-                save_runtime_preferences();
-                reopen_audio_output_device(true);
-            }
-            if (selected_default) {
-                ImGui::SetItemDefaultFocus();
-            }
-
-            for (size_t i = 0; i < g_audio_output_devices.size(); i++) {
-                const bool selected = g_audio_output_devices[i] == g_audio_target_device_name;
-                if (ImGui::Selectable(g_audio_output_devices[i].c_str(), selected)) {
-                    g_audio_target_device_name = g_audio_output_devices[i];
+            /* ---------------------------------------------------------- JUEGO */
+            if (ImGui::BeginTabItem("Juego")) {
+                ImGui::SeparatorText("Estados guardados");
+                ImGui::TextWrapped("Un estado guarda el juego exactamente como está ahora, aunque el "
+                                   "cartucho no tenga pila. Hay %d ranuras.", GB_SAVESTATE_SLOT_COUNT);
+                int savestate_slot = g_savestate_slot + 1;
+                ImGui::SetNextItemWidth(220.0f * ui_scale);
+                if (ImGui::SliderInt("Ranura", &savestate_slot, 1, GB_SAVESTATE_SLOT_COUNT)) {
+                    g_savestate_slot = savestate_slot - 1;
                     save_runtime_preferences();
+                }
+                std::string savestate_path;
+                const bool slot_exists = savestate_slot_exists(g_registered_ctx, g_savestate_slot, &savestate_path);
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", slot_exists ? "ocupada" : "vacía");
+                if (ImGui::Button("Guardar estado (F5)")) {
+                    save_savestate_slot(g_registered_ctx, g_savestate_slot);
+                }
+                ImGui::SameLine();
+                ImGui::BeginDisabled(!slot_exists);
+                if (ImGui::Button("Cargar estado (F8)")) {
+                    load_savestate_slot(g_registered_ctx, g_savestate_slot);
+                    g_show_menu = false;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Borrar ranura")) {
+                    delete_savestate_slot(g_registered_ctx, g_savestate_slot);
+                }
+                ImGui::EndDisabled();
+                if (!g_savestate_status.empty()) {
+                    ImGui::TextDisabled("%s", g_savestate_status.c_str());
+                }
+                ImGui::TextDisabled("F6 / F7 cambian de ranura durante el juego.");
+
+                ImGui::SeparatorText("Portada de la biblioteca");
+                ImGui::TextWrapped("Usa la imagen actual del juego como portada en el launcher.");
+                if (ImGui::Button("Capturar portada (P)")) {
+                    capture_library_cover();
+                }
+
+                ImGui::SeparatorText("Velocidad");
+                ImGui::TextWrapped("Mantén Tab para avanzar rápido. Velocidad actual: %d%%.",
+                                   effective_speed_percent());
+                ImGui::EndTabItem();
+            }
+
+            /* --------------------------------------------------------- IMAGEN */
+            if (ImGui::BeginTabItem("Imagen")) {
+                ImGui::SeparatorText("Paleta de colores");
+                const bool locked = display_palette_locked();
+                if (locked) {
+                    ImGui::TextWrapped("Este juego es de Game Boy Color y usa sus propios colores.");
+                } else {
+                    ImGui::TextWrapped("Cambia los colores de los juegos de Game Boy clásico. "
+                                       "Durante el juego: tecla - (anterior) y + (siguiente).");
+                }
+                ImGui::BeginDisabled(locked);
+                if (ImGui::ArrowButton("##pal_prev", ImGuiDir_Left)) {
+                    select_display_palette(g_display_palette - 1, false);
+                }
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(320.0f * ui_scale);
+                if (ImGui::BeginCombo("##palette", display_palette_name(g_display_palette))) {
+                    for (int i = 0; i < display_palette_total(); ++i) {
+                        ImGui::PushID(i);
+                        /* four-shade swatch */
+                        const uint32_t* shades = i == 0 ? NULL : kGbDisplayPalettes[i - 1].bg;
+                        ImDrawList* dl = ImGui::GetWindowDrawList();
+                        const ImVec2 at = ImGui::GetCursorScreenPos();
+                        const float sw = ImGui::GetTextLineHeight();
+                        for (int k = 0; k < 4; ++k) {
+                            const uint32_t rgb = shades ? shades[k] : (ppu_get_dmg_shade_rgb((uint8_t)k) & 0xFFFFFFu);
+                            dl->AddRectFilled(ImVec2(at.x + k * sw, at.y), ImVec2(at.x + (k + 1) * sw, at.y + sw),
+                                              IM_COL32((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, 255));
+                        }
+                        ImGui::Dummy(ImVec2(sw * 4.0f, sw));
+                        ImGui::SameLine();
+                        const bool selected = (i == g_display_palette);
+                        if (ImGui::Selectable(display_palette_name(i), selected)) {
+                            select_display_palette(i, false);
+                        }
+                        if (selected) ImGui::SetItemDefaultFocus();
+                        ImGui::PopID();
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::SameLine();
+                if (ImGui::ArrowButton("##pal_next", ImGuiDir_Right)) {
+                    select_display_palette(g_display_palette + 1, false);
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("%d / %d", g_display_palette + 1, display_palette_total());
+                ImGui::EndDisabled();
+
+                ImGui::SeparatorText("Pantalla");
+                bool fullscreen = g_fullscreen;
+                if (ImGui::Checkbox("Pantalla completa", &fullscreen)) {
+                    set_fullscreen_enabled(fullscreen);
+                }
+                if (!g_fullscreen) {
+                    int scale_idx = g_scale - 1;
+                    ImGui::SetNextItemWidth(220.0f * ui_scale);
+                    if (ImGui::Combo("Tamaño de ventana", &scale_idx, g_scale_names, IM_ARRAYSIZE(g_scale_names))) {
+                        g_scale = scale_idx + 1;
+                        apply_window_scale_preset();
+                    }
+                }
+                static const char* const kScalingNames[] = {"Píxeles exactos", "Mantener proporción", "Estirar"};
+                int scaling_mode = (int)g_render_scaling_mode;
+                ImGui::SetNextItemWidth(220.0f * ui_scale);
+                if (ImGui::Combo("Escalado", &scaling_mode, kScalingNames, IM_ARRAYSIZE(kScalingNames))) {
+                    g_render_scaling_mode = (GBRenderScalingMode)scaling_mode;
+                    update_game_viewport();
+                }
+                static const char* const kFilterNames[] = {"Nítido (píxeles)", "Suavizado"};
+                int filter_mode = (int)g_render_filter_mode;
+                ImGui::SetNextItemWidth(220.0f * ui_scale);
+                if (ImGui::Combo("Filtro", &filter_mode, kFilterNames, IM_ARRAYSIZE(kFilterNames))) {
+                    g_render_filter_mode = (GBRenderFilterMode)filter_mode;
+                    update_render_filter();
+                }
+                ImGui::Spacing();
+                if (ImGui::Button("Restablecer imagen")) {
+                    reset_runtime_display_defaults();
+                }
+                ImGui::EndTabItem();
+            }
+
+            /* --------------------------------------------------------- SONIDO */
+            if (ImGui::BeginTabItem("Sonido")) {
+                ImGui::SeparatorText("Sonido");
+                if (ImGui::Checkbox("Activar sonido", &g_audio_output_enabled)) {
+                    reset_audio_output_buffer(true);
+                    save_runtime_preferences();
+                }
+                bool audio_muted = g_audio_muted.load(std::memory_order_relaxed);
+                if (ImGui::Checkbox("Silenciar (M)", &audio_muted)) {
+                    g_audio_muted.store(audio_muted, std::memory_order_relaxed);
+                    save_runtime_preferences();
+                }
+                int audio_volume_percent = (int)g_audio_volume_percent.load(std::memory_order_relaxed);
+                ImGui::SetNextItemWidth(260.0f * ui_scale);
+                if (ImGui::SliderInt("Volumen (%)", &audio_volume_percent, 0, 200)) {
+                    g_audio_volume_percent.store((uint32_t)audio_volume_percent, std::memory_order_relaxed);
+                    save_runtime_preferences();
+                }
+                ImGui::SetNextItemWidth(320.0f * ui_scale);
+                const char* device_label = g_audio_target_device_name.empty()
+                    ? "Predeterminado del sistema" : current_audio_output_device_label();
+                if (ImGui::BeginCombo("Salida de audio", device_label)) {
+                    const bool selected_default = g_audio_target_device_name.empty();
+                    if (ImGui::Selectable("Predeterminado del sistema", selected_default)) {
+                        g_audio_target_device_name.clear();
+                        save_runtime_preferences();
+                        reopen_audio_output_device(true);
+                    }
+                    for (size_t i = 0; i < g_audio_output_devices.size(); i++) {
+                        const bool selected = g_audio_output_devices[i] == g_audio_target_device_name;
+                        if (ImGui::Selectable(g_audio_output_devices[i].c_str(), selected)) {
+                            g_audio_target_device_name = g_audio_output_devices[i];
+                            save_runtime_preferences();
+                            reopen_audio_output_device(true);
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (!current_audio_output_device_available()) {
+                    ImGui::TextDisabled("El dispositivo elegido no está disponible; se usa el predeterminado.");
+                }
+                if (ImGui::Button("Buscar dispositivos")) {
+                    refresh_audio_output_devices();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Reconectar audio")) {
                     reopen_audio_output_device(true);
                 }
-                if (selected) {
-                    ImGui::SetItemDefaultFocus();
+                ImGui::SameLine();
+                if (ImGui::Button("Restablecer sonido")) {
+                    reset_runtime_audio_defaults();
                 }
+                if (effective_speed_percent() != 100) {
+                    ImGui::TextDisabled("El sonido se pausa mientras la velocidad no es 100%%.");
+                }
+                ImGui::EndTabItem();
             }
-            ImGui::EndCombo();
-        }
-        int audio_latency_ms = (int)g_audio_latency_ms;
-        if (ImGui::SliderInt("Target Audio Latency (ms)", &audio_latency_ms, 20, 250)) {
-            g_audio_latency_ms = (uint32_t)audio_latency_ms;
-            recompute_audio_targets();
-            reset_audio_output_buffer(true);
-            save_runtime_preferences();
-        }
-        if (ImGui::Button("Refresh Devices")) {
-            refresh_audio_output_devices();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Reconnect Audio")) {
-            reopen_audio_output_device(true);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Clear Audio Buffer")) {
-            reset_audio_output_buffer(true);
-        }
-        ImGui::Text("Requested Output: %s", current_audio_output_device_label());
-        ImGui::Text("Active Output: %s", g_audio_active_device_name.empty() ? "Unavailable" : g_audio_active_device_name.c_str());
-        if (!current_audio_output_device_available()) {
-            ImGui::TextDisabled("Requested device is unavailable. Using the default output when possible.");
-        }
-        ImGui::Text("Ring Buffer: %u / %u samples", current_audio_ring_fill_samples(), current_audio_ring_capacity());
-        ImGui::Text("Device: %u Hz, device buffer %u, start %u, low-water %u",
-                    g_audio_device_sample_rate,
-                    g_audio_device_buffer_samples,
-                    g_audio_start_threshold,
-                    g_audio_low_watermark);
-        if (effective_speed_percent() != 100) {
-            ImGui::TextDisabled("Audio output pauses while Speed %% is not 100.");
-        }
-        if (ImGui::Button("Reset Audio")) {
-            reset_runtime_audio_defaults();
-        }
 
-        ImGui::Separator();
-        ImGui::TextDisabled("Savestates");
-        int savestate_slot = g_savestate_slot + 1;
-        if (ImGui::SliderInt("Active Slot", &savestate_slot, 1, GB_SAVESTATE_SLOT_COUNT)) {
-            g_savestate_slot = savestate_slot - 1;
-            save_runtime_preferences();
-        }
-        if (ImGui::Button("Save State (F5)")) {
-            save_savestate_slot(g_registered_ctx, g_savestate_slot);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Load State (F8)")) {
-            load_savestate_slot(g_registered_ctx, g_savestate_slot);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Delete Slot")) {
-            delete_savestate_slot(g_registered_ctx, g_savestate_slot);
-        }
-        {
-            std::string savestate_path;
-            const bool slot_exists = savestate_slot_exists(g_registered_ctx, g_savestate_slot, &savestate_path);
-            ImGui::Text("Slot File: %s", savestate_path.empty() ? "(unavailable)" : savestate_path.c_str());
-            ImGui::Text("Slot Status: %s", slot_exists ? "Present" : "Empty");
-        }
-        if (!g_savestate_status.empty()) {
-            ImGui::TextWrapped("%s", g_savestate_status.c_str());
-        }
-
-        ImGui::Separator();
-        ImGui::TextDisabled("Controls");
-        if (!g_controller_name.empty()) {
-            ImGui::Text("Detected Controller: %s", g_controller_name.c_str());
-            ImGui::TextDisabled("Profile: %s", controller_type_name(g_controller_type));
-        } else {
-#if defined(__ANDROID__)
-            ImGui::TextDisabled("No controller detected. Controller mappings will apply when one is connected.");
-#else
-            ImGui::TextDisabled("No controller detected.");
-#endif
-        }
-        render_binding_editor("Keyboard Gameplay",
-                              GB_CAPTURE_DEVICE_KEYBOARD,
-                              g_keyboard_bindings,
-                              GB_INPUT_ACTION_RIGHT,
-                              GB_INPUT_ACTION_FAST_FORWARD);
-        ImGui::Spacing();
-        render_binding_editor("Controller Gameplay",
-                              GB_CAPTURE_DEVICE_CONTROLLER,
-                              g_controller_bindings,
-                              GB_INPUT_ACTION_RIGHT,
-                              GB_INPUT_ACTION_FAST_FORWARD);
-        ImGui::Spacing();
-        render_binding_editor("Keyboard Shortcuts",
-                              GB_CAPTURE_DEVICE_KEYBOARD,
-                              g_keyboard_bindings,
-                              GB_INPUT_ACTION_FAST_FORWARD,
-                              GB_INPUT_ACTION_COUNT);
-        ImGui::Spacing();
-        render_binding_editor("Controller Shortcuts",
-                              GB_CAPTURE_DEVICE_CONTROLLER,
-                              g_controller_bindings,
-                              GB_INPUT_ACTION_FAST_FORWARD,
-                              GB_INPUT_ACTION_COUNT);
-        if (g_binding_capture_active) {
-            ImGui::Separator();
-            ImGui::TextDisabled("Waiting for %s input for %s slot %d",
-                                g_binding_capture_device == GB_CAPTURE_DEVICE_KEYBOARD ? "keyboard" : "controller",
-                                g_input_action_names[g_binding_capture_action],
-                                g_binding_capture_slot + 1);
-            if (ImGui::Button("Cancel Capture")) {
-                cancel_binding_capture();
+            /* ------------------------------------------------------ CONTROLES */
+            if (ImGui::BeginTabItem("Controles")) {
+                if (!g_controller_name.empty()) {
+                    ImGui::Text("Mando conectado: %s", g_controller_name.c_str());
+                } else {
+                    ImGui::TextDisabled("No hay ningún mando conectado (se puede jugar con el teclado).");
+                }
+                ImGui::TextDisabled("Haz clic en una tecla y pulsa la nueva. Cada acción admite dos teclas.");
+                ImGui::SeparatorText("Botones del Game Boy - teclado");
+                render_binding_editor("Teclado", GB_CAPTURE_DEVICE_KEYBOARD, g_keyboard_bindings,
+                                      GB_INPUT_ACTION_RIGHT, GB_INPUT_ACTION_FAST_FORWARD);
+                ImGui::SeparatorText("Botones del Game Boy - mando");
+                render_binding_editor("Mando", GB_CAPTURE_DEVICE_CONTROLLER, g_controller_bindings,
+                                      GB_INPUT_ACTION_RIGHT, GB_INPUT_ACTION_FAST_FORWARD);
+                ImGui::SeparatorText("Atajos - teclado");
+                render_binding_editor("Atajos teclado", GB_CAPTURE_DEVICE_KEYBOARD, g_keyboard_bindings,
+                                      GB_INPUT_ACTION_FAST_FORWARD, GB_INPUT_ACTION_COUNT);
+                ImGui::SeparatorText("Atajos - mando");
+                render_binding_editor("Atajos mando", GB_CAPTURE_DEVICE_CONTROLLER, g_controller_bindings,
+                                      GB_INPUT_ACTION_FAST_FORWARD, GB_INPUT_ACTION_COUNT);
+                ImGui::TextDisabled("Fijas: Esc abre este menú; - y + cambian la paleta.");
+                ImGui::TextDisabled("%s", controller_menu_hint_text());
+                if (g_binding_capture_active) {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Esperando %s para \"%s\" (tecla %d)...",
+                                        g_binding_capture_device == GB_CAPTURE_DEVICE_KEYBOARD ? "una tecla" : "un botón del mando",
+                                        g_input_action_names[g_binding_capture_action],
+                                        g_binding_capture_slot + 1);
+                    if (ImGui::Button("Cancelar")) {
+                        cancel_binding_capture();
+                    }
+                }
+                ImGui::Spacing();
+                if (ImGui::Button("Restablecer controles")) {
+                    reset_runtime_control_defaults();
+                }
+                ImGui::EndTabItem();
             }
-        }
-        if (ImGui::Button("Reset Controls")) {
-            reset_runtime_control_defaults();
-        }
-        ImGui::TextDisabled("Shortcut bindings can also control fast forward, max speed, savestates, overlay, mute, and the menu.");
-        ImGui::BulletText("%s", controller_menu_hint_text());
-#if defined(__ANDROID__)
-        ImGui::BulletText("Android Back / Escape: Settings Menu");
-#else
-        ImGui::BulletText("Escape: Settings Menu");
-#endif
 
-        if (has_interpreter_activity(g_registered_ctx)) {
-            const GBInterpreterHotspot* hotspot = &g_registered_ctx->interpreter_hotspots[0];
-            ImGui::Separator();
-            ImGui::TextDisabled("Interpreter Fallback");
-            ImGui::Text("Frame Fallbacks: %u", g_registered_ctx->frame_dispatch_fallbacks);
-            ImGui::Text("Interp Entries: %llu",
-                        (unsigned long long)g_registered_ctx->total_interpreter_entries);
-            ImGui::Text("Total Fallbacks: %llu",
-                        (unsigned long long)g_registered_ctx->total_dispatch_fallbacks);
-            ImGui::Text("Interp Instr: frame %llu total %llu",
-                        (unsigned long long)g_registered_ctx->frame_interpreter_instructions,
-                        (unsigned long long)g_registered_ctx->total_interpreter_instructions);
-            ImGui::Text("Interp Cycles: frame %llu total %llu",
-                        (unsigned long long)g_registered_ctx->frame_interpreter_cycles,
-                        (unsigned long long)g_registered_ctx->total_interpreter_cycles);
-            if (hotspot->valid && hotspot->entries > 0) {
-                ImGui::Text("Top Hotspot: %03X:%04X", hotspot->bank, hotspot->addr);
-                ImGui::Text("Hits %llu Instr %llu Cycles %llu",
-                            (unsigned long long)hotspot->entries,
-                            (unsigned long long)hotspot->instructions,
-                            (unsigned long long)hotspot->cycles);
-            }
-            if (g_registered_ctx->has_unimplemented_interpreter_opcode) {
-                ImGui::Text("Coverage Gap: %02X at %03X:%04X",
-                            g_registered_ctx->last_unimplemented_opcode,
-                            g_registered_ctx->last_unimplemented_bank,
-                            g_registered_ctx->last_unimplemented_addr);
-            }
-        }
+            /* ------------------------------------------------------- AVANZADO */
+            if (ImGui::BeginTabItem("Avanzado")) {
+                ImGui::TextDisabled("Opciones técnicas. No hace falta tocarlas para jugar.");
+                ImGui::SeparatorText("Rendimiento");
+                ImGui::Text("Fotogramas por segundo: %.1f", ImGui::GetIO().Framerate);
+                ImGui::SetNextItemWidth(260.0f * ui_scale);
+                if (ImGui::SliderInt("Velocidad (%)", &g_speed_percent, 10, 500)) {
+                    reset_audio_output_buffer(true);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("100%")) {
+                    g_speed_percent = 100;
+                    g_max_speed_mode = false;
+                    reset_audio_output_buffer(true);
+                }
+                if (ImGui::Checkbox("V-Sync", &g_vsync)) {
+                    SDL_RenderSetVSync(g_renderer, g_vsync ? 1 : 0);
+                }
+                ImGui::Checkbox("Mostrar rendimiento en pantalla (F1)", &g_show_overlay);
+                ImGui::Checkbox("Suavizar fotogramas lentos", &g_smooth_lcd_transitions);
 
+                ImGui::SeparatorText("Audio (técnico)");
+                int audio_latency_ms = (int)g_audio_latency_ms;
+                ImGui::SetNextItemWidth(260.0f * ui_scale);
+                if (ImGui::SliderInt("Latencia (ms)", &audio_latency_ms, 20, 250)) {
+                    g_audio_latency_ms = (uint32_t)audio_latency_ms;
+                    recompute_audio_targets();
+                    reset_audio_output_buffer(true);
+                    save_runtime_preferences();
+                }
+                if (ImGui::Button("Vaciar búfer de audio")) {
+                    reset_audio_output_buffer(true);
+                }
+                ImGui::TextDisabled("Salida activa: %s", g_audio_active_device_name.empty() ? "no disponible" : g_audio_active_device_name.c_str());
+                ImGui::TextDisabled("Búfer: %u / %u muestras  ·  %u Hz", current_audio_ring_fill_samples(),
+                                    current_audio_ring_capacity(), g_audio_device_sample_rate);
+
+                if (has_interpreter_activity(g_registered_ctx)) {
+                    const GBInterpreterHotspot* hotspot = &g_registered_ctx->interpreter_hotspots[0];
+                    ImGui::SeparatorText("Diagnóstico del recompilador");
+                    ImGui::TextDisabled("Código que no se tradujo y se ejecuta con el intérprete (más lento).");
+                    ImGui::Text("Entradas al intérprete: %llu",
+                                (unsigned long long)g_registered_ctx->total_interpreter_entries);
+                    ImGui::Text("Instrucciones: %llu en este fotograma, %llu en total",
+                                (unsigned long long)g_registered_ctx->frame_interpreter_instructions,
+                                (unsigned long long)g_registered_ctx->total_interpreter_instructions);
+                    if (hotspot->valid && hotspot->entries > 0) {
+                        ImGui::Text("Zona más usada: %03X:%04X (%llu entradas)", hotspot->bank, hotspot->addr,
+                                    (unsigned long long)hotspot->entries);
+                    }
+                    if (g_registered_ctx->has_unimplemented_interpreter_opcode) {
+                        ImGui::Text("Instrucción no implementada: %02X en %03X:%04X",
+                                    g_registered_ctx->last_unimplemented_opcode,
+                                    g_registered_ctx->last_unimplemented_bank,
+                                    g_registered_ctx->last_unimplemented_addr);
+                    }
+                }
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
         ImGui::EndChild();
         ImGui::Separator();
 
+        /* ---- footer -------------------------------------------------------- */
         const int footer_button_count = g_launcher_return_enabled ? 3 : 2;
         const float footer_button_width =
             (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * (footer_button_count - 1)) /
             (float)footer_button_count;
-        if (ImGui::Button("Reset Display", ImVec2(footer_button_width, 0.0f))) {
-            reset_runtime_display_defaults();
+        if (ImGui::Button("Volver al juego", ImVec2(footer_button_width, 0.0f))) {
+            g_show_menu = false;
         }
-
         if (g_launcher_return_enabled) {
             ImGui::SameLine();
-            if (ImGui::Button("Return to Launcher", ImVec2(footer_button_width, 0.0f))) {
+            if (ImGui::Button("Volver al selector de juegos", ImVec2(footer_button_width, 0.0f))) {
                 g_exit_action = GB_PLATFORM_EXIT_RETURN_TO_LAUNCHER;
                 SDL_Event quit_event;
                 quit_event.type = SDL_QUIT;
                 SDL_PushEvent(&quit_event);
             }
         }
-
         ImGui::SameLine();
-        if (ImGui::Button("Quit", ImVec2(footer_button_width, 0.0f))) {
+        if (ImGui::Button("Salir del juego", ImVec2(footer_button_width, 0.0f))) {
             g_exit_action = GB_PLATFORM_EXIT_QUIT;
             SDL_Event quit_event;
             quit_event.type = SDL_QUIT;
@@ -3269,6 +3310,32 @@ bool gb_platform_init(int scale) {
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
 
+    // A system font with Latin-1 (Spanish accents, ñ) and arrows for the menu
+    // and palette names; falls back to ImGui's built-in ASCII font.
+    {
+        static ImVector<ImWchar> ranges;
+        if (ranges.empty()) {
+            ImFontGlyphRangesBuilder builder;
+            builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
+            static const ImWchar extra[] = {0x2026, 0x2026, 0x2190, 0x2193, 0};
+            builder.AddRanges(extra);
+            builder.BuildRanges(&ranges);
+        }
+        static const char* const kFontCandidates[] = {
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "C:\\Windows\\Fonts\\arial.ttf",
+        };
+        for (const char* candidate : kFontCandidates) {
+            FILE* probe = fopen(candidate, "rb");
+            if (!probe) continue;
+            fclose(probe);
+            if (io.Fonts->AddFontFromFileTTF(candidate, 16.0f, NULL, ranges.Data)) break;
+        }
+    }
+
     // Setup Platform/Renderer backends
     ImGui_ImplSDL2_InitForSDLRenderer(g_window, g_renderer);
     ImGui_ImplSDLRenderer2_Init(g_renderer);
@@ -3473,6 +3540,18 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
             uint8_t previous_dpad = g_joypad_dpad;
             uint8_t previous_buttons = g_joypad_buttons;
 
+            if (pressed && event->key.repeat == 0 && !g_show_menu) {
+                const SDL_Keycode sym = event->key.keysym.sym;
+                if (sym == SDLK_MINUS || sym == SDLK_KP_MINUS) {
+                    step_display_palette(-1);
+                    return true;
+                }
+                if (sym == SDLK_PLUS || sym == SDLK_EQUALS || sym == SDLK_KP_PLUS) {
+                    step_display_palette(+1);
+                    return true;
+                }
+            }
+
             switch (event->key.keysym.scancode) {
                 case SDL_SCANCODE_F2:
                     if (ctx && pressed && event->key.repeat == 0) {
@@ -3493,7 +3572,12 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
                 case SDL_SCANCODE_ESCAPE:
                 case SDL_SCANCODE_AC_BACK:
                     if (pressed && event->key.repeat == 0) {
-                        g_show_menu = !g_show_menu;
+                        /* Escape inside an open list/popup only closes that popup. */
+                        const bool popup_open = g_show_menu && ImGui::GetCurrentContext() != NULL &&
+                            ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+                        if (!popup_open) {
+                            g_show_menu = !g_show_menu;
+                        }
                     }
                     return true;
 
@@ -3632,6 +3716,27 @@ bool gb_platform_poll_events(GBContext* ctx) {
             }
             if (!handle_runtime_event(&event, ctx)) {
                 return false;
+            }
+        }
+
+        /* Pause the game while the settings menu is open: keep presenting the
+         * last frame with the menu on top, but do not advance emulation (the
+         * frame pacer resynchronises on its own after a long gap). */
+        if (g_show_menu && g_window && g_renderer && ImGui::GetCurrentContext() != NULL) {
+            reset_audio_output_buffer(true);   /* silence, not a looping buffer */
+            while (g_show_menu) {
+                while (SDL_PollEvent(&event)) {
+                    ImGui_ImplSDL2_ProcessEvent(&event);
+                    if (!handle_runtime_event(&event, ctx)) {
+                        return false;
+                    }
+                }
+                if (g_last_guest_framebuffer_valid) {
+                    gb_platform_present_framebuffer(g_last_guest_framebuffer);
+                } else {
+                    gb_platform_render_lcd_off_frame();
+                }
+                SDL_Delay(16);
             }
         }
     }
@@ -3874,13 +3979,58 @@ static void sdl_get_rtc_path(char* buffer, size_t size, const char* rom_name) {
     sdl_get_persistent_path(buffer, size, rom_name, ".rtc");
 }
 
+/* ---- Display palettes ------------------------------------------------------ */
+static int display_palette_total(void) { return 1 + GB_DISPLAY_PALETTE_COUNT; }
+
+static const char* display_palette_name(int index) {
+    return index <= 0 ? "Original del motor" : kGbDisplayPalettes[index - 1].name;
+}
+
+static bool display_palette_locked(void) {   /* CGB games draw their own colours */
+    return g_registered_ctx && g_registered_ctx->config.model == GB_MODEL_CGB;
+}
+
+static void apply_display_palette(void) {
+    if (g_display_palette <= 0 || g_display_palette > GB_DISPLAY_PALETTE_COUNT) {
+        g_display_palette = 0;
+        ppu_set_dmg_layer_palettes(NULL, NULL, NULL);
+    } else {
+        const GBDisplayPalette& p = kGbDisplayPalettes[g_display_palette - 1];
+        ppu_set_dmg_layer_palettes(p.bg, p.obj0, p.obj1);
+    }
+    g_lcd_off_framebuffer_initialized = false;
+}
+
+static void select_display_palette(int index, bool announce) {
+    const int total = display_palette_total();
+    g_display_palette = ((index % total) + total) % total;
+    apply_display_palette();
+    save_runtime_preferences();
+    if (announce) {
+        char text[160];
+        snprintf(text, sizeof(text), "Paleta %d/%d: %s", g_display_palette + 1, total,
+                 display_palette_name(g_display_palette));
+        g_toast_text = text;
+        g_toast_until_ms = SDL_GetTicks() + 2000;
+    }
+}
+
+static void step_display_palette(int delta) {
+    if (display_palette_locked()) {
+        g_toast_text = "Los juegos de Game Boy Color usan sus propios colores";
+        g_toast_until_ms = SDL_GetTicks() + 2500;
+        return;
+    }
+    select_display_palette(g_display_palette + delta, true);
+}
+
 /* "Capture Library Cover" action: saves the current Game Boy frame as
  * cover.bmp next to the game's saves (the --save-dir folder when given), where
  * a launcher can pick it up as the game's thumbnail. Written to a temporary
  * file and renamed, so a reader never sees a half-written image. */
 static void capture_library_cover(void) {
     if (!g_last_guest_framebuffer_valid) {
-        g_toast_text = "No frame to capture yet";
+        g_toast_text = "Todavía no hay imagen que capturar";
         g_toast_until_ms = SDL_GetTicks() + 2500;
         return;
     }
@@ -3901,7 +4051,7 @@ static void capture_library_cover(void) {
     }
     if (!ok) remove(tmp.c_str());
     fprintf(stderr, "[GBRT] %s library cover: %s\n", ok ? "Saved" : "Failed to save", path);
-    g_toast_text = ok ? "Cover captured for the library" : "Could not save the cover";
+    g_toast_text = ok ? "Portada capturada para la biblioteca" : "No se pudo guardar la portada";
     g_toast_until_ms = SDL_GetTicks() + 2500;
 }
 

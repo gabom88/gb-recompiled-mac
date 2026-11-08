@@ -30,12 +30,13 @@ The default desktop controls are:
 | Mute | M | — |
 | Settings menu | F10 or Escape | — |
 | Capture library cover | P | F12 |
+| Previous / next display palette | - | + (fixed keys; also `=` and keypad) |
 
 Controllers are enabled automatically. The default mapping uses the D-pad or left stick, physical south/east face buttons for Game Boy B/A, and Start/Back for Start/Select. Guide/Home or L3 opens the settings menu; R3 opens the native game panel when the exact-ROM port supplies one. Escape and Android Back also open the settings menu. While a native panel captures input, its D-pad/left-stick and A/B actions do not reach the guest game.
 
-The settings menu can remap keyboard and controller gameplay actions and shortcuts. It also exposes audio output, speed, savestate slots, display smoothing, and diagnostic controls. Preferences are stored in SDL's per-application preference directory.
+The settings menu (in Spanish) **pauses the game** while it is open and is organised in tabs: *Juego* (savestate slots, library cover, speed hint), *Imagen* (display palette, fullscreen, window size, scaling, filter), *Sonido* (output, mute, volume, device), *Controles* (Game Boy buttons and shortcuts for keyboard and controller) and *Avanzado* (speed, V-Sync, performance overlay, audio latency and recompiler diagnostics). Port-only actions, such as the native game panel, are listed only when an exact-ROM port is attached. Escape inside an open list closes only that list. Preferences are stored in SDL's per-application preference directory.
 
-The Palette selector changes DMG display colors to green, black and white, or amber. It affects the displayed image; diagnostic frame dumps retain the PPU's original colors. CGB games and DMG games running in CGB compatibility mode keep their hardware color palettes, so the selector is disabled in those modes.
+The display palette applies to DMG games: the engine's original colours plus 68 schemes imported from the GemuBoy JS emulator (`runtime/src/gb_display_palettes.h`), including the Game Boy Color boot colourisations that tint OBP0/OBP1 sprites separately from the background. Cycle them with `-` / `+` while playing (an on-screen notice shows the name) or pick one with a colour preview in *Imagen*; the choice is saved as `video.palette=<id>`. A chosen palette is applied inside the PPU per layer (`ppu_set_dmg_layer_palettes`), so frame dumps show it too; with the default *Original del motor* the PPU output is unchanged. Palettes are not part of savestates. CGB games keep their own colours, so the selector is disabled for them.
 
 ## Saves and savestates
 

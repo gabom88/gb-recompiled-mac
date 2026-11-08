@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cerrno>
 #include <csignal>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -245,6 +246,7 @@ struct Game {
     std::string rom_file;     // ROM copy inside the game folder (names the executable)
     bool cgb = false;
     bool battery = false;
+    bool resume = true;       // "Continuar donde lo dejé"
     std::string exe;          // absolute path of the built executable ("" if none)
     time_t built_at = 0;
     std::string status;       // "ok", "failed", "never"
@@ -265,6 +267,7 @@ static void save_game_ini(const Game& g) {
       << "rom_file=" << g.rom_file << "\n"
       << "cgb=" << (g.cgb ? 1 : 0) << "\n"
       << "battery=" << (g.battery ? 1 : 0) << "\n"
+      << "resume=" << (g.resume ? 1 : 0) << "\n"
       << "exe=" << g.exe << "\n"
       << "built_at=" << (long long)g.built_at << "\n"
       << "status=" << g.status << "\n";
@@ -287,6 +290,7 @@ static bool load_game_ini(const fs::path& dir, Game& g) {
     g.rom_file = kv["rom_file"].empty() ? "rom.gb" : kv["rom_file"];
     g.cgb = kv["cgb"] == "1";
     g.battery = kv["battery"] == "1";
+    g.resume = kv["resume"] != "0";   // on unless explicitly disabled
     g.exe = kv["exe"];
     g.built_at = (time_t)atoll(kv["built_at"].c_str());
     g.status = kv["status"].empty() ? "never" : kv["status"];
@@ -586,33 +590,63 @@ static void install_dependencies(std::vector<std::string> pkgs) {
 }
 
 // ---- Playing ------------------------------------------------------------------
-struct Running { pid_t pid; std::string id; std::string title; };
+// "Continuar donde lo dejé": the runtime writes a complete savestate when the
+// game closes normally (--save-state-file) and the next launch resumes from it
+// (--load-state-file). A state from an older runtime can be rejected; then the
+// game exits at once with "Failed to load execution state", so the launcher
+// sets that file aside and starts the game from the beginning instead.
+struct Running { pid_t pid; std::string id; std::string title; bool resumed; };
 static std::vector<Running> g_running;
 static std::string g_toast;          // short status message under the header
 static Uint32 g_toast_until = 0;
 
 static void toast(const std::string& s, Uint32 ms = 6000) { g_toast = s; g_toast_until = SDL_GetTicks() + ms; }
 
-static void play_game(const Game& g) {
+static fs::path resume_path(const Game& g) { return save_dir(g) / "resume.state"; }
+
+static bool has_resume(const Game& g) {
+    std::error_code ec;
+    return fs::is_regular_file(resume_path(g), ec);
+}
+
+static void play_game(const Game& g, bool allow_resume = true) {
     if (g.exe.empty()) return;
     std::error_code ec;
     fs::create_directories(save_dir(g), ec);
     const fs::path cwd = fs::path(g.exe).parent_path();
     const fs::path runlog = game_dir(g) / "last_run.log";
+    const std::string sd = save_dir(g).string();
+    const std::string rs = resume_path(g).string();
+    const bool resume_now = g.resume && allow_resume && has_resume(g);
+
+    std::vector<std::string> args = {g.exe, "--save-dir", sd};
+    if (g.resume) { args.push_back("--save-state-file"); args.push_back(rs); }
+    if (resume_now) { args.push_back("--load-state-file"); args.push_back(rs); }
+
     pid_t pid = fork();
     if (pid == 0) {
         setsid();
         int fd = open(runlog.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
         if (chdir(cwd.c_str()) != 0) _exit(126);
-        const std::string sd = save_dir(g).string();
-        execl(g.exe.c_str(), g.exe.c_str(), "--save-dir", sd.c_str(), (char*)nullptr);
+        std::vector<char*> a;
+        for (auto& x : args) a.push_back(const_cast<char*>(x.c_str()));
+        a.push_back(nullptr);
+        execv(a[0], a.data());
         _exit(127);
     }
     if (pid > 0) {
-        g_running.push_back({pid, g.id, g.title});
-        toast("Abriendo " + g.title + "...");
+        g_running.push_back({pid, g.id, g.title, resume_now});
+        toast((resume_now ? "Continuando " : "Abriendo ") + g.title + "...");
     }
+}
+
+static bool log_mentions(const fs::path& log, const char* needle) {
+    std::ifstream in(log);
+    std::string line;
+    while (std::getline(in, line))
+        if (line.find(needle) != std::string::npos) return true;
+    return false;
 }
 
 static void reap_games() {
@@ -620,9 +654,24 @@ static void reap_games() {
         int st = 0;
         pid_t r = waitpid(g_running[i].pid, &st, WNOHANG);
         if (r == g_running[i].pid) {
-            const bool bad = !WIFEXITED(st) || WEXITSTATUS(st) != 0;
-            if (bad) toast(g_running[i].title + " se cerró con un error. Mira last_run.log en la carpeta del juego.", 10000);
+            const Running done = g_running[i];
             g_running.erase(g_running.begin() + (long)i);
+            const bool bad = !WIFEXITED(st) || WEXITSTATUS(st) != 0;
+            if (!bad) continue;
+            // An incompatible resume state: set it aside and start fresh.
+            const Game* g = nullptr;
+            for (const auto& x : g_games) if (x.id == done.id) g = &x;
+            if (g && done.resumed &&
+                log_mentions(game_dir(*g) / "last_run.log", "Failed to load execution state")) {
+                std::error_code ec;
+                fs::rename(resume_path(*g),
+                           save_dir(*g) / ("resume-incompatible-" + std::to_string((long long)time(nullptr)) + ".state"), ec);
+                toast("No se pudo continuar la partida anterior (es de otra versión del motor). "
+                      "Empezando desde el principio.", 10000);
+                play_game(*g, false);
+                continue;
+            }
+            toast(done.title + " se cerró con un error. Mira last_run.log en la carpeta del juego.", 10000);
         } else {
             ++i;
         }
@@ -1034,7 +1083,8 @@ static void draw_game_details(Game& g, float scale) {
 
     ImGui::Dummy(ImVec2(0, 6 * scale));
     const float bw = 190 * scale, bh = 46 * scale;
-    if (big_button(playing ? "Jugando..." : "JUGAR", ImVec2(bw, bh), pal::lcd1, pal::lcd3,
+    const char* play_label = playing ? "Jugando..." : (g.resume && has_resume(g) ? "CONTINUAR" : "JUGAR");
+    if (big_button(play_label, ImVec2(bw, bh), pal::lcd1, pal::lcd3,
                    g.status == "ok" && !playing && !building_this))
         play_game(g);
     ImGui::SameLine(0, 12 * scale);
@@ -1044,15 +1094,52 @@ static void draw_game_details(Game& g, float scale) {
         begin_recompile(g);
 
     ImGui::Dummy(ImVec2(0, 8 * scale));
+    heading("CONTINUAR DONDE LO DEJÉ");
+    {
+        bool resume = g.resume;
+        ImGui::BeginDisabled(playing);
+        if (ImGui::Checkbox("Al cerrar el juego, guardar el punto exacto y continuar desde ahí la próxima vez", &resume)) {
+            g.resume = resume;
+            save_game_ini(g);
+        }
+        ImGui::EndDisabled();
+        ImGui::PushFont(g_font_small);
+        if (g.resume && has_resume(g)) {
+            std::error_code ec;
+            const auto ft = fs::last_write_time(resume_path(g), ec);
+            const auto sys = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                ft - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+            ImGui::TextColored(pal::lcd1, "Hay una partida en pausa (guardada el %s). Pulsa CONTINUAR para seguirla.",
+                               human_time(std::chrono::system_clock::to_time_t(sys)).c_str());
+        } else if (g.resume) {
+            ImGui::TextWrapped("Juega y cierra el juego normalmente: la próxima vez seguirás justo donde lo dejaste "
+                               "(también conserva los récords de juegos sin pila, como Tetris).");
+        } else {
+            ImGui::TextWrapped("Desactivado: el juego siempre empieza desde el principio.");
+        }
+        ImGui::PopFont();
+        if (g.resume && has_resume(g)) {
+            ImGui::BeginDisabled(playing);
+            if (ImGui::Button("Empezar de cero")) {
+                std::error_code ec;
+                fs::remove(resume_path(g), ec);
+                toast("La próxima vez " + g.title + " empezará desde el principio.");
+            }
+            ImGui::EndDisabled();
+        }
+    }
+
+    ImGui::Dummy(ImVec2(0, 6 * scale));
     heading("PARTIDAS GUARDADAS");
     ImGui::PushFont(g_font_small);
     ImGui::TextWrapped("Se guardan aparte, en tu carpeta de usuario: recompilar o borrar el juego no las toca.");
     if (g.battery)
         ImGui::TextWrapped("Este cartucho tiene pila: el progreso se guarda como en la consola (al guardar dentro del juego).");
     else
-        ImGui::TextWrapped("Este cartucho NO tiene pila: el juego original tampoco guardaba nada al apagarse "
-                           "(por ejemplo, los récords de Tetris). Usa los estados: F5 guarda, F8 carga, "
-                           "F6/F7 cambian de ranura. En un MacBook con Touch Bar, mantén fn.");
+        ImGui::TextWrapped("Este cartucho NO tiene pila: el juego original no guardaba nada al apagarse "
+                           "(por ejemplo, los récords de Tetris). Con \"Continuar donde lo dejé\" se conserva todo; "
+                           "también puedes usar los estados: F5 guarda, F8 carga, F6/F7 cambian de ranura "
+                           "(en un MacBook con Touch Bar, mantén fn).");
     ImGui::PopFont();
     if (ImGui::Button("Abrir carpeta de partidas")) open_in_finder(save_dir(g));
     ImGui::SameLine();
