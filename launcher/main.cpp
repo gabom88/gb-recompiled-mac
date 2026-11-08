@@ -823,7 +823,54 @@ static void heading(const char* s) {
     ImGui::PopStyleColor();
 }
 
-// A tiny DMG "screen" tile with the game's initials.
+// ---- Library covers -----------------------------------------------------------
+// While playing, the "Capture Library Cover" action (P / F12) makes the
+// runtime save the current frame as saves/<game>/cover.bmp. The launcher
+// shows it as the game's thumbnail and picks up new captures automatically.
+static SDL_Renderer* g_renderer = nullptr;
+
+struct Cover {
+    SDL_Texture* tex = nullptr;
+    int w = 0, h = 0;
+    fs::file_time_type mtime{};
+    Uint32 next_check = 0;
+};
+static std::map<std::string, Cover> g_covers;
+
+static fs::path cover_path(const Game& g) { return save_dir(g) / "cover.bmp"; }
+
+static void drop_cover(const std::string& id) {
+    auto it = g_covers.find(id);
+    if (it == g_covers.end()) return;
+    if (it->second.tex) SDL_DestroyTexture(it->second.tex);
+    g_covers.erase(it);
+}
+
+static const Cover* get_cover(const Game& g) {
+    Cover& c = g_covers[g.id];
+    const Uint32 now = SDL_GetTicks();
+    if (c.next_check != 0 && !SDL_TICKS_PASSED(now, c.next_check)) return c.tex ? &c : nullptr;
+    c.next_check = now + 1000;   // re-check the file once a second
+    std::error_code ec;
+    const fs::path p = cover_path(g);
+    if (!fs::exists(p, ec)) {
+        if (c.tex) { SDL_DestroyTexture(c.tex); c.tex = nullptr; }
+        return nullptr;
+    }
+    const auto mt = fs::last_write_time(p, ec);
+    if (c.tex && !ec && mt == c.mtime) return &c;
+    if (SDL_Surface* surf = SDL_LoadBMP(p.c_str())) {
+        if (SDL_Texture* t = SDL_CreateTextureFromSurface(g_renderer, surf)) {
+            SDL_SetTextureScaleMode(t, SDL_ScaleModeNearest);   // crisp pixels
+            if (c.tex) SDL_DestroyTexture(c.tex);
+            c.tex = t; c.w = surf->w; c.h = surf->h; c.mtime = mt;
+        }
+        SDL_FreeSurface(surf);
+    }
+    return c.tex ? &c : nullptr;
+}
+
+// A tiny DMG "screen" tile: the captured cover if there is one, else initials.
 static void game_tile(const Game& g, float size) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
@@ -831,6 +878,16 @@ static void game_tile(const Game& g, float size) {
     const float m = size * 0.12f;
     dl->AddRectFilled(ImVec2(p.x + m, p.y + m), ImVec2(p.x + size - m, p.y + size - m),
                       ImGui::GetColorU32(g.cgb ? hex(0xA6C8A0) : pal::lcd3), 3);
+    if (const Cover* c = get_cover(g)) {
+        // fit the 10:9 Game Boy frame inside the screen area
+        const float box = size - 2 * m;
+        const float sc = std::min(box / (float)c->w, box / (float)c->h);
+        const float iw = c->w * sc, ih = c->h * sc;
+        const ImVec2 a(p.x + m + (box - iw) * 0.5f, p.y + m + (box - ih) * 0.5f);
+        dl->AddImage((ImTextureID)c->tex, a, ImVec2(a.x + iw, a.y + ih));
+        ImGui::Dummy(ImVec2(size, size));
+        return;
+    }
     std::string ini;
     for (char c : g.title) {
         if (isalnum((unsigned char)c)) { ini += (char)toupper((unsigned char)c); if (ini.size() == 2) break; }
@@ -1005,6 +1062,22 @@ static void draw_game_details(Game& g, float scale) {
     if (ImGui::Button("Eliminar de la biblioteca")) { g_confirm_delete = true; g_delete_saves = false; }
     ImGui::EndDisabled();
 
+    ImGui::Dummy(ImVec2(0, 6 * scale));
+    heading("PORTADA");
+    ImGui::PushFont(g_font_small);
+    ImGui::TextWrapped("Mientras juegas, pulsa P (o F12; en la Touch Bar, fn+F12) y la pantalla de ese "
+                       "momento se convierte en la portada del juego en esta biblioteca.");
+    ImGui::PopFont();
+    {
+        std::error_code ec;
+        if (fs::exists(cover_path(g), ec)) {
+            if (ImGui::Button("Quitar portada")) {
+                fs::remove(cover_path(g), ec);
+                drop_cover(g.id);
+            }
+        }
+    }
+
     if (const KnownRom* k = find_known(g.sha1)) {
         ImGui::Dummy(ImVec2(0, 4 * scale));
         ImGui::PushFont(g_font_small);
@@ -1028,6 +1101,7 @@ static void draw_delete_modal() {
             if (big_button("Eliminar", ImVec2(140, 0), pal::magenta, ImVec4(1, 1, 1, 1))) {
                 std::error_code ec;
                 fs::remove_all(game_dir(g), ec);
+                drop_cover(g.id);
                 if (g_delete_saves) fs::remove_all(save_dir(g), ec);
                 toast("Eliminado: " + g.title);
                 reload_library();
@@ -1174,6 +1248,7 @@ int main(int argc, char** argv) {
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
     if (!ren) { fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError()); return 1; }
+    g_renderer = ren;
 
     // HiDPI (Retina): render at pixel density, lay out in points.
     int ww, wh, pw, ph;
@@ -1228,6 +1303,8 @@ int main(int argc, char** argv) {
 
     if (g_job.running) cancel_job();
     if (g_job.th.joinable()) g_job.th.join();
+    for (auto& kv : g_covers) if (kv.second.tex) SDL_DestroyTexture(kv.second.tex);
+    g_covers.clear();
     ImGui_ImplSDLRenderer2_Shutdown();
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();

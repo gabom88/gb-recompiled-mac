@@ -8,8 +8,10 @@ Ninja, y deja el juego en tu biblioteca listo para **Jugar**.
 ![GB Recompiled: biblioteca de juegos con la paleta del Game Boy DMG](../docs/mac/launcher.png)
 
 > Este repositorio es un fork de [arcanite24/gb-recompiled](https://github.com/arcanite24/gb-recompiled).
-> El recompilador y el runtime son los del proyecto original, sin modificar. El
-> fork solo añade el launcher (`launcher/`) y el instalador (`macos/install.sh`).
+> El recompilador es el del proyecto original, sin cambios. El fork añade el
+> launcher (`launcher/`) y el instalador (`macos/install.sh`), y dos mejoras
+> pequeñas al runtime: el **autoguardado de la pila** y la **captura de portada**
+> (ver [sección 3](#3-partidas-guardadas) y [sección 4](#4-portadas-de-la-biblioteca)).
 
 ---
 
@@ -92,6 +94,9 @@ Hay dos formas de guardar:
 
 - **Guardado del propio juego (pila del cartucho).** Los juegos con pila, como
   Pokémon o Zelda, guardan cuando guardas dentro del juego, como en la consola.
+  El `.sav` se escribe **al momento**, en cuanto el juego termina de guardar
+  (en 1–3 segundos), y no solo al cerrar. Así no se pierde aunque el juego se
+  cuelgue, uses *Forzar salida* o se apague el Mac.
 - **Estados (en cualquier juego):** **F5** guarda, **F8** carga y **F6/F7**
   cambian de ranura (hay 10). En un MacBook con Touch Bar, mantén **fn**.
 
@@ -100,7 +105,18 @@ Hay dos formas de guardar:
 
 ---
 
-## 4. Controles del juego
+## 4. Portadas de la biblioteca
+
+Mientras juegas, pulsa **`P`** (o **`F12`**; en la Touch Bar, **fn+F12**) y la
+pantalla de ese momento se convierte en la **portada** del juego en la
+biblioteca. Verás el aviso *"Cover captured for the library"* abajo en el juego,
+y el launcher la muestra al instante, aunque el juego siga abierto. Puedes
+capturar otra cuando quieras para cambiarla, o pulsar **Quitar portada** en la
+ficha del juego. Se guarda como `cover.bmp` junto a las partidas.
+
+---
+
+## 5. Controles del juego
 
 | Game Boy | Teclado |
 |---|---|
@@ -113,12 +129,13 @@ Hay dos formas de guardar:
 | `Esc` | Menú de ajustes del juego (controles, sonido, imagen, ranuras). |
 | `Tab` (mantener) | Avance rápido. |
 | `F5` / `F8` | Guardar / cargar estado. |
+| `P` o `F12` | Capturar la portada para la biblioteca. |
 
 La lista completa está en [RUNTIME.md](../RUNTIME.md).
 
 ---
 
-## 5. Actualizar
+## 6. Actualizar
 
 ```bash
 cd ~/gb-recompiled-mac && git pull && ./macos/install.sh
@@ -130,7 +147,7 @@ pueden no cargar; los `.sav` de la pila siempre se mantienen.
 
 ---
 
-## 6. Solución de problemas
+## 7. Solución de problemas
 
 | Síntoma | Solución |
 |---|---|
@@ -139,11 +156,13 @@ pueden no cargar; los `.sav` de la pila siempre se mantienen.
 | Error al recompilar | Pulsa **Ver detalles** o abre `build.log` con **Abrir carpeta del juego**. |
 | El juego se cierra al abrirlo | Mira `last_run.log` en la carpeta del juego. |
 | macOS dice que no puede abrir la app | Clic derecho sobre la app › **Abrir** › **Abrir** (solo la primera vez). |
-| `F5`/`F8` no hacen nada | En la Touch Bar mantén **fn**. |
+| `F5`/`F8`/`F12` no hacen nada | En la Touch Bar mantén **fn**, o usa `P` para la portada. |
+| Un juego con pila no conserva la partida | Pulsa **Recompilar** en ese juego: el autoguardado viene en el runtime que se copia al recompilar. |
+| `P` no captura la portada | Ese juego se compiló con una versión anterior: pulsa **Recompilar**. |
 
 ---
 
-## 7. Cómo funciona por dentro
+## 8. Cómo funciona por dentro
 
 ```
 ROM ──► gbrecomp ──► proyecto C (+ copia del runtime) ──► cmake + ninja ──► juego nativo
@@ -155,13 +174,23 @@ ROM ──► gbrecomp ──► proyecto C (+ copia del runtime) ──► cmak
   Ninja informa de su progreso (`[n/m]`) y con eso se calcula la barra.
 - Ejecuta cada juego con `--save-dir saves/<juego>`, una opción del runtime
   original.
+- **Cambios al runtime** (`runtime/src/platform_sdl.cpp`, documentados en
+  [RUNTIME.md](../RUNTIME.md)): el autoguardado de la pila y la acción *Capture
+  library cover*. Como el port de Pokémon Crystal fija la huella del runtime,
+  se actualizó `ports/pokemon-crystal/standalone/gbrecomp-contract.json`.
 - Con `-DGBRECOMP_BUILD_LAUNCHER=ON` se compila junto al resto del proyecto. Por
   defecto está desactivado, así que la compilación normal del proyecto original
   no cambia.
 
 **Cómo se probó** (en Linux, sin un Mac físico): con una ROM real de Tetris
 V1.1 se comprobaron añadir, recompilar (~21 s), jugar, guardar con F5,
-recompilar y cargar con F8, y que el estado sobrevivió. También se probaron el
+recompilar y cargar con F8, y que el estado sobrevivió. La pila se probó con
+una ROM propia de cartucho MBC1 + pila que suma 1 a un contador en cada
+arranque: el `.sav` llegó a 1 → 2 → 3 **cerrando el juego a la fuerza**
+(`kill -9`) en cada arranque. La portada se probó pulsando `P` en el título de
+Tetris (se creó `cover.bmp`, apareció el aviso y la biblioteca la mostró).
+Batería de pruebas del repo: 83/85; los 2 fallos también ocurren sin estos
+cambios. También se probaron el
 aviso de dependencias y el rechazo de archivos que no son ROMs. El launcher
 compila sin avisos con GCC y Clang. **Pendiente de confirmar en un Mac:** el
 selector de archivos de macOS, arrastrar a la ventana, el icono y la `.app`.

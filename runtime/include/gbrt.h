@@ -652,6 +652,13 @@ bool gb_context_load_rom(GBContext* ctx, const uint8_t* data, size_t size);
 bool gb_context_save_ram(GBContext* ctx);
 
 /**
+ * @brief Whether the loaded cartridge keeps external RAM on a battery
+ * @param ctx Target context
+ * @return true when the cartridge type has a battery (its RAM is persisted)
+ */
+bool gb_context_has_battery(const GBContext* ctx);
+
+/**
  * @brief Persist only the supplied battery-RAM snapshot
  *
  * This does not save RTC state and does not mutate the context. The snapshot

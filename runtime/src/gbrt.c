@@ -1439,6 +1439,11 @@ bool gb_context_save_battery_snapshot(
     return ram_result;
 }
 
+bool gb_context_has_battery(const GBContext* ctx) {
+    return ctx && ctx->rom && ctx->rom_size > 0x147u &&
+           gb_cart_type_has_battery(ctx->rom[0x147]);
+}
+
 bool gb_context_save_ram(GBContext* ctx) {
     if (!ctx || !ctx->eram || !ctx->eram_size) {
         return false;

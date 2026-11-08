@@ -114,7 +114,8 @@ typedef enum GBInputAction {
     GB_INPUT_ACTION_TOGGLE_MUTE = 15,
     GB_INPUT_ACTION_TOGGLE_MENU = 16,
     GB_INPUT_ACTION_TOGGLE_PORT_UI = 17,
-    GB_INPUT_ACTION_COUNT = 18,
+    GB_INPUT_ACTION_CAPTURE_COVER = 18,
+    GB_INPUT_ACTION_COUNT = 19,
 } GBInputAction;
 typedef enum GBInputBindingKind {
     GB_INPUT_BINDING_NONE = 0,
@@ -153,6 +154,10 @@ static constexpr int GB_FAST_FORWARD_SPEED_PERCENT = 250;
 static constexpr int GB_MAX_SHORTCUT_SPEED_PERCENT = 500;
 static int g_savestate_slot = 0;
 static std::string g_savestate_status;
+/* Short on-screen notice drawn over the game (e.g. "cover captured"). */
+static std::string g_toast_text;
+static Uint32 g_toast_until_ms = 0;
+static void capture_library_cover(void);
 static const char* g_render_scaling_mode_names[] = {
     "Pixel Perfect",
     "Aspect Fit",
@@ -208,6 +213,7 @@ static const char* g_input_action_names[GB_INPUT_ACTION_COUNT] = {
     "Toggle Mute",
     "Toggle Menu",
     "Toggle Game Panel",
+    "Capture Library Cover",
 };
 
 static bool has_interpreter_activity(const GBContext* ctx) {
@@ -839,6 +845,7 @@ static const char* input_action_config_name(GBInputAction action) {
         case GB_INPUT_ACTION_TOGGLE_MUTE: return "toggle_mute";
         case GB_INPUT_ACTION_TOGGLE_MENU: return "toggle_menu";
         case GB_INPUT_ACTION_TOGGLE_PORT_UI: return "toggle_port_ui";
+        case GB_INPUT_ACTION_CAPTURE_COVER: return "capture_cover";
         case GB_INPUT_ACTION_COUNT:
         default:
             return "unknown";
@@ -943,6 +950,8 @@ static void set_default_input_bindings(void) {
     g_keyboard_bindings[GB_INPUT_ACTION_TOGGLE_MUTE][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_M);
     g_keyboard_bindings[GB_INPUT_ACTION_TOGGLE_MENU][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F10);
     g_keyboard_bindings[GB_INPUT_ACTION_TOGGLE_PORT_UI][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F2);
+    g_keyboard_bindings[GB_INPUT_ACTION_CAPTURE_COVER][0] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_P);
+    g_keyboard_bindings[GB_INPUT_ACTION_CAPTURE_COVER][1] = make_binding(GB_INPUT_BINDING_KEY, SDL_SCANCODE_F12);
 
     g_controller_bindings[GB_INPUT_ACTION_UP][0] = make_binding(GB_INPUT_BINDING_CONTROLLER_BUTTON, SDL_CONTROLLER_BUTTON_DPAD_UP);
     g_controller_bindings[GB_INPUT_ACTION_UP][1] = make_binding(GB_INPUT_BINDING_CONTROLLER_AXIS_NEGATIVE, SDL_CONTROLLER_AXIS_LEFTY);
@@ -1310,6 +1319,10 @@ static void update_runtime_action_state(GBContext* ctx) {
 
                 case GB_INPUT_ACTION_TOGGLE_MENU:
                     g_show_menu = !g_show_menu;
+                    break;
+
+                case GB_INPUT_ACTION_CAPTURE_COVER:
+                    capture_library_cover();
                     break;
 
                 case GB_INPUT_ACTION_TOGGLE_PORT_UI:
@@ -2655,6 +2668,21 @@ static void render_frame_internal(const uint32_t* framebuffer, bool count_guest_
         }
     }
 
+    if (!g_toast_text.empty() && !SDL_TICKS_PASSED(SDL_GetTicks(), g_toast_until_ms)) {
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f,
+                                       viewport->Pos.y + viewport->Size.y - 24.0f),
+                                ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+        ImGui::SetNextWindowBgAlpha(0.80f);
+        if (ImGui::Begin("##toast", NULL,
+                         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs)) {
+            ImGui::TextUnformatted(g_toast_text.c_str());
+        }
+        ImGui::End();
+    }
+
     ImGui::Render();
     ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData());
     g_last_timing.compose_ms = sdl_now_ms() - compose_start_ms;
@@ -3517,8 +3545,73 @@ static bool handle_runtime_event(const SDL_Event* event, GBContext* ctx) {
     return true;
 }
 
+/* Battery autosave. The runtime used to write the .sav only on a clean exit,
+ * so a force-quit, crash or power loss dropped everything the game had saved
+ * in that session. Like a real cartridge, persist the battery RAM once the
+ * game has finished writing it: the RAM differs from the last saved copy and
+ * has stayed unchanged for a moment (1 s if the game already disabled SRAM
+ * access, 3 s if it leaves it enabled). Writes are atomic (temp + rename),
+ * and the exit-time save still runs as before. */
+static const GBContext* g_autosave_owner = nullptr;
+static std::vector<uint8_t> g_autosave_saved;     /* RAM as last persisted/loaded */
+static std::vector<uint8_t> g_autosave_pending;   /* RAM seen at the previous check */
+static int g_autosave_stable_checks = 0;
+static Uint32 g_autosave_next_ms = 0;
+
+/* Fallback baseline for a context whose battery RAM was not loaded through
+ * sdl_load_battery_ram (which normally records it before the game runs). */
+static void battery_autosave_reset(GBContext* ctx) {
+    g_autosave_owner = ctx;
+    g_autosave_saved.clear();
+    g_autosave_pending.clear();
+    g_autosave_stable_checks = 0;
+    g_autosave_next_ms = SDL_GetTicks() + 1000;
+    if (ctx && ctx->eram && ctx->eram_size) {
+        g_autosave_saved.assign(ctx->eram, ctx->eram + ctx->eram_size);
+    }
+}
+
+static void battery_autosave_tick(GBContext* ctx) {
+    if (!ctx || !ctx->eram || ctx->eram_size == 0 || ctx->persistence_load_failed ||
+        !gb_context_has_battery(ctx)) {
+        return;
+    }
+    const size_t size = ctx->eram_size;
+    if (g_autosave_owner != ctx || g_autosave_saved.size() != size) {
+        battery_autosave_reset(ctx);
+        return;
+    }
+    const Uint32 now = SDL_GetTicks();
+    if ((Sint32)(now - g_autosave_next_ms) < 0) return;
+    g_autosave_next_ms = now + 1000;
+
+    if (memcmp(g_autosave_saved.data(), ctx->eram, size) == 0) {   /* nothing new */
+        g_autosave_pending.clear();
+        g_autosave_stable_checks = 0;
+        return;
+    }
+    if (g_autosave_pending.size() != size ||
+        memcmp(g_autosave_pending.data(), ctx->eram, size) != 0) {
+        g_autosave_pending.assign(ctx->eram, ctx->eram + size);   /* still changing */
+        g_autosave_stable_checks = 0;
+        return;
+    }
+    ++g_autosave_stable_checks;
+    if (ctx->ram_enabled && g_autosave_stable_checks < 3) return;  /* may still be writing */
+    if (gb_context_save_ram(ctx)) {
+        g_autosave_saved = g_autosave_pending;
+        fprintf(stderr, "[GBRT] Autosaved battery RAM (%zu bytes)\n", size);
+    }
+    g_autosave_pending.clear();
+    g_autosave_stable_checks = 0;
+}
+
 bool gb_platform_poll_events(GBContext* ctx) {
     SDL_Event event;
+
+    if (!g_benchmark_mode) {
+        battery_autosave_tick(ctx);
+    }
 
     if (!g_benchmark_mode) {
         while (SDL_PollEvent(&event)) {
@@ -3781,6 +3874,37 @@ static void sdl_get_rtc_path(char* buffer, size_t size, const char* rom_name) {
     sdl_get_persistent_path(buffer, size, rom_name, ".rtc");
 }
 
+/* "Capture Library Cover" action: saves the current Game Boy frame as
+ * cover.bmp next to the game's saves (the --save-dir folder when given), where
+ * a launcher can pick it up as the game's thumbnail. Written to a temporary
+ * file and renamed, so a reader never sees a half-written image. */
+static void capture_library_cover(void) {
+    if (!g_last_guest_framebuffer_valid) {
+        g_toast_text = "No frame to capture yet";
+        g_toast_until_ms = SDL_GetTicks() + 2500;
+        return;
+    }
+    char path[1024];
+    sdl_get_persistent_path(path, sizeof(path), "cover", ".bmp");
+    const std::string tmp = std::string(path) + ".tmp";
+    bool ok = false;
+    SDL_Surface* argb = SDL_CreateRGBSurfaceWithFormatFrom(
+        (void*)g_last_guest_framebuffer, GB_SCREEN_WIDTH, GB_SCREEN_HEIGHT, 32,
+        GB_SCREEN_WIDTH * (int)sizeof(uint32_t), SDL_PIXELFORMAT_ARGB8888);
+    if (argb) {
+        SDL_Surface* rgb = SDL_ConvertSurfaceFormat(argb, SDL_PIXELFORMAT_RGB24, 0);
+        if (rgb) {
+            ok = SDL_SaveBMP(rgb, tmp.c_str()) == 0 && rename(tmp.c_str(), path) == 0;
+            SDL_FreeSurface(rgb);
+        }
+        SDL_FreeSurface(argb);
+    }
+    if (!ok) remove(tmp.c_str());
+    fprintf(stderr, "[GBRT] %s library cover: %s\n", ok ? "Saved" : "Failed to save", path);
+    g_toast_text = ok ? "Cover captured for the library" : "Could not save the cover";
+    g_toast_until_ms = SDL_GetTicks() + 2500;
+}
+
 static void context_storage_name(const GBContext* ctx, char* buffer, size_t size) {
     if (!buffer || size == 0) {
         return;
@@ -4034,7 +4158,7 @@ static bool write_persistence_transaction(
     return true;
 }
 
-static bool sdl_load_battery_ram(GBContext* ctx, const char* rom_name, void* data, size_t size) {
+static bool sdl_load_battery_ram_file(GBContext* ctx, const char* rom_name, void* data, size_t size) {
     char filename[512];
     sdl_get_save_path(filename, sizeof(filename), rom_name);
     
@@ -4060,6 +4184,20 @@ static bool sdl_load_battery_ram(GBContext* ctx, const char* rom_name, void* dat
 
     memcpy(data, loaded.data(), size);
     return true;
+}
+
+/* Load callback: also records the autosave baseline (the RAM as it is on disk,
+ * or its power-on contents when there is no .sav yet) before the game runs. */
+static bool sdl_load_battery_ram(GBContext* ctx, const char* rom_name, void* data, size_t size) {
+    const bool loaded = sdl_load_battery_ram_file(ctx, rom_name, data, size);
+    if (ctx && data && size) {
+        g_autosave_owner = ctx;
+        g_autosave_saved.assign((const uint8_t*)data, (const uint8_t*)data + size);
+        g_autosave_pending.clear();
+        g_autosave_stable_checks = 0;
+        g_autosave_next_ms = SDL_GetTicks() + 1000;
+    }
+    return loaded;
 }
 
 static bool sdl_save_battery_ram(GBContext* ctx, const char* rom_name, const void* data, size_t size) {

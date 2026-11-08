@@ -29,6 +29,7 @@ The default desktop controls are:
 | Encounter Lens extension | F3 | — |
 | Mute | M | — |
 | Settings menu | F10 or Escape | — |
+| Capture library cover | P | F12 |
 
 Controllers are enabled automatically. The default mapping uses the D-pad or left stick, physical south/east face buttons for Game Boy B/A, and Start/Back for Start/Select. Guide/Home or L3 opens the settings menu; R3 opens the native game panel when the exact-ROM port supplies one. Escape and Android Back also open the settings menu. While a native panel captures input, its D-pad/left-stick and A/B actions do not reach the guest game.
 
@@ -39,6 +40,10 @@ The Palette selector changes DMG display colors to green, black and white, or am
 ## Saves and savestates
 
 Battery-backed RAM and MBC3 RTC data are loaded and saved by the SDL platform layer. Savestates provide ten slots per game and are checked against the ROM and state-format version before loading.
+
+Battery RAM is also autosaved while the game runs, as on a real cartridge: about once a second the SDL layer compares it with the copy last loaded or persisted, and once it has changed and then stayed unchanged for a moment (one check after the game disables SRAM access, three while access stays enabled) the `.sav` is written atomically and `[GBRT] Autosaved battery RAM` is logged. A force-quit or crash therefore keeps what the game had already saved; the save at a clean exit still runs. Autosave is off in `--benchmark` mode and never overwrites persistence that was rejected on load.
+
+The **Capture library cover** action saves the current Game Boy frame as `cover.bmp` (160×144, 24-bit) in the persistence directory — the `--save-dir` folder when given — through a temporary file and an atomic rename, and shows a short on-screen notice. Front ends such as the macOS launcher (`launcher/`) use it as the game's thumbnail.
 
 Treat savestates as local to a compatible runtime/game build. A runtime update can intentionally reject an older state when internal hardware state changes. Battery `.sav` files are the more durable persistence format.
 
