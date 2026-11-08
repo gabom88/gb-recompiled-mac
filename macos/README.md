@@ -12,7 +12,8 @@ Ninja, y deja el juego en tu biblioteca listo para **Jugar**.
 > launcher (`launcher/`), el instalador (`macos/install.sh`) y estas mejoras al
 > runtime de los juegos:
 > **autoguardado de la pila**, **portadas**, **68 paletas de color** con `-`/`+`
-> y un **menú `Esc` en español, ordenado y que pausa el juego**.
+> y un **menú de ajustes en español, en su propia ventana**, para ver los
+> cambios en vivo.
 
 ---
 
@@ -158,14 +159,24 @@ otra cuando quieras, o pulsar **Quitar portada** en la ficha del juego.
 
 | Atajo | Acción |
 |---|---|
-| `Esc` | Abre o cierra el menú (el juego **se pausa** mientras está abierto). |
+| `Esc` | Abre o cierra la **ventana de ajustes** (junto al juego, sin taparlo). |
 | `-` / `+` | Paleta anterior / siguiente. |
 | `Tab` (mantener) | Avance rápido. |
 | `F5` / `F8` | Guardar / cargar estado (`F6`/`F7` cambian de ranura). |
 | `P` o `F12` | Capturar la portada para la biblioteca. |
 | `M` | Silenciar. |
 
-**El menú `Esc`** está en español y en pestañas:
+**Los ajustes** (`Esc`) se abren en **una ventana aparte**, junto a la del juego:
+
+- **Los cambios se ven al momento** en la ventana del juego, sin que el menú la
+  tape: paletas, escalado, pantalla completa…
+- Si la pantalla tiene sitio, la ventana del juego se desplaza a la izquierda
+  para que las dos quepan lado a lado.
+- El juego **sigue corriendo** mientras ajustas. Si prefieres detenerlo, pulsa
+  **Pausar juego** en la propia ventana de ajustes.
+- `Esc` (en cualquiera de las dos ventanas) o **Cerrar ajustes** la cierran;
+  cerrarla nunca cierra el juego. Lo que escribas en ella no llega al juego,
+  salvo cuando estás asignando un control.
 
 | Pestaña | Contenido |
 |---|---|
@@ -174,6 +185,18 @@ otra cuando quieras, o pulsar **Quitar portada** en la ficha del juego.
 | **Sonido** | Activar sonido, silenciar, volumen y dispositivo de salida. |
 | **Controles** | Botones del Game Boy y atajos, para teclado y mando (clic y pulsa la nueva tecla). |
 | **Avanzado** | Lo técnico: velocidad, V-Sync, rendimiento en pantalla, latencia de audio y diagnóstico del recompilador. |
+
+**Escalado** (pestaña *Imagen*). Útil al maximizar la ventana o en pantalla
+completa:
+
+| Modo | Resultado |
+|---|---|
+| **Píxeles exactos** | Múltiplos exactos del tamaño original: lo más nítido, con bordes negros. |
+| **Ajustar** | Lo más grande posible sin deformar; puede dejar bordes. |
+| **Llenar (recorta)** | Cubre toda la ventana sin deformar; **recorta** arriba/abajo o a los lados. |
+| **Estirar** | Ocupa **toda la ventana sin recortar nada**; la imagen se deforma. |
+
+El escalado y el filtro elegidos se recuerdan.
 
 Las opciones que solo sirven para ports especiales (como el panel del port de
 Pokémon Crystal) ya no aparecen en los juegos normales.
@@ -206,6 +229,8 @@ cada juego compilado. Los estados de una versión anterior pueden no cargar; los
 | `F5`/`F8`/`F12` no hacen nada | En la Touch Bar mantén **fn**, o usa `P` para la portada. |
 | *"No se pudo continuar la partida anterior"* | Era de otra versión del motor: se apartó y el juego empezó de cero. |
 | Las paletas no cambian nada | Es un juego de Game Boy Color: usa sus propios colores. |
+| Al maximizar se corta la imagen arriba y abajo | Está en **Llenar (recorta)**. Para ocupar toda la ventana sin recortar elige **Estirar**; para no deformar, **Ajustar**. |
+| La paleta no cambia mientras el juego está en pausa | Es normal: el cambio se ve en cuanto pulsas **Reanudar juego**. |
 
 ---
 
@@ -224,7 +249,7 @@ ROM ──► gbrecomp ──► proyecto C (+ copia del runtime) ──► cmak
   resume.state`.
 - **Cambios al runtime** (documentados en [RUNTIME.md](../RUNTIME.md)):
   - `platform_sdl.cpp`: autoguardado de la pila, acción de portada, paletas con
-    `-`/`+`, menú en pestañas que pausa el juego y fuente con tildes.
+    `-`/`+`, ventana de ajustes aparte (con pausa opcional), escalado guardado y fuente con tildes.
   - `ppu.c`: paleta opcional por capa (fondo, OBP0, OBP1). Sin paleta elegida,
     la salida es idéntica a la original.
   - `gb_display_palettes.h`: las 68 paletas importadas de GemuBoy.
@@ -241,8 +266,13 @@ V1.1:
 - **Portada:** con `P` se creó `cover.bmp` y la biblioteca la mostró.
 - **Paletas:** con `-`/`+` y desde el menú; en *GBC Rojo*, la pieza (sprite)
   sale verde sobre fondo rojo.
-- **Menú:** las cinco pestañas funcionan. Con el menú abierto 4 s la pieza no
-  se movió; sin menú, cayó.
+- **Ventana de ajustes:** se abre junto al juego (que se desplaza para dejarle
+  sitio), las cinco pestañas funcionan, la paleta cambia en vivo desde ella, se
+  abrió y cerró 3 veces seguidas sin perder el teclado del juego, y **Salir del
+  juego** cerró todo guardando la partida en pausa.
+- **Escalado:** con la ventana del juego en formato ancho, *Ajustar* deja
+  bordes, *Llenar* recorta arriba y abajo y *Estirar* ocupa toda la ventana sin
+  recortar.
 - **Continuar:** al cerrar se creó `resume.state` y CONTINUAR volvió al mismo
   punto (*"Loaded execution state"*). Con un `resume.state` corrupto, la app lo
   apartó y abrió el juego desde el principio.
