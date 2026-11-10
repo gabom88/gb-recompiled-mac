@@ -297,10 +297,9 @@ aquí porque esas ROMs no están disponibles. **Pendiente de confirmar en un
 Mac:** el selector de archivos de macOS, arrastrar a la ventana, el icono y la
 `.app`.
 
-> Las capturas de esta guía usan la ROM de prueba libre
-> [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) (licencia MIT), no juegos
-> comerciales. La línea que se ve en su "boca" es una imprecisión del motor
-> original de la PPU, no de este fork.
+> Las capturas de esta guía son de **Tetris (V1.1)** recompilado con la app.
+> El repositorio **no incluye ninguna ROM**: usa la tuya. Tetris y sus gráficos
+> pertenecen a sus respectivos propietarios.
 
 ---
 
